@@ -131,41 +131,15 @@ with tab2:
 
     result = st.session_state.get("solution_result")
     if result:
-        st.markdown("---")
-        st.subheader(f"Outputs ({result['language']})")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.download_button(
-                "📥 Extracted JSON",
-                data=open(result["extracted_json"], "rb").read(),
-                file_name="extracted_data.json",
-                mime="application/json",
-            )
-        with col2:
-            st.download_button(
-                "📥 Solved JSON",
-                data=open(result["solved_json"], "rb").read(),
-                file_name="solved_data.json",
-                mime="application/json",
-            )
-        with col3:
-            st.download_button(
-                "📥 Translated JSON",
-                data=open(result["translated_json"], "rb").read(),
-                file_name=f"translated_{result['language']}.json",
-                mime="application/json",
-            )
         final_docx_path = result.get("final_docx")
         if final_docx_path and os.path.exists(final_docx_path):
+            st.markdown("---")
             st.download_button(
-                "📥 Final DOCX",
+                "📥 Download Final DOCX",
                 data=open(final_docx_path, "rb").read(),
                 file_name=f"solutions_{result['language']}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
-
-        st.markdown("### Sample translated records")
-        st.json(result.get("sample", [])[:3])
 
 # Tab 3: MCQ Generator
 with tab3:
@@ -173,7 +147,7 @@ with tab3:
     topic = st.text_input("Topic", placeholder="e.g., Photosynthesis, Algebra, WW-II")
     num_questions = st.number_input("How many questions?", min_value=1, max_value=10, value=5)
     mcq_translate_lang = st.selectbox(
-        "Translate MCQs to",
+        "Generate MCQs in",
         options=list(LANGUAGES.keys()),
         index=list(LANGUAGES.keys()).index("English"),
         key="mcq_translate_lang",
@@ -183,36 +157,33 @@ with tab3:
         if not topic.strip():
             st.warning("Please type a topic first.")
         else:
-            with st.spinner("Generating MCQs..."):
-                raw = generate_mcqs(topic, num_questions)
+            with st.spinner(f"Generating MCQs in {mcq_translate_lang}..."):
+                # Generate MCQs directly in the selected language
+                raw = generate_mcqs(topic, num_questions, mcq_translate_lang)
             mcqs = parse_mcqs(raw) if raw else None
             if mcqs:
+                # If language is not English, translate the generated MCQs
+                if mcq_translate_lang != "English":
+                    with st.spinner(f"Translating MCQs to {mcq_translate_lang}..."):
+                        translated_items = _translate_mcq_items(mcqs, mcq_translate_lang)
+                    st.session_state["translated_mcqs"] = translated_items
+                    st.session_state["mcqs_translated_lang"] = mcq_translate_lang
+                else:
+                    st.session_state["translated_mcqs"] = None
+                    st.session_state["mcqs_translated_lang"] = "English"
                 st.session_state["mcqs_data"] = mcqs
                 st.session_state["mcqs_topic"] = topic
-                st.session_state["translated_mcqs"] = None
-                st.session_state["mcqs_translated_lang"] = None
             else:
                 st.error("Failed to parse MCQ output. Please retry.")
 
     mcqs = st.session_state.get("mcqs_data") or []
 
-    if st.button("🌐 Translate MCQs", disabled=not mcqs):
-        if not mcqs:
-            st.info("Generate MCQs first, then translate.")
-        else:
-            with st.spinner(f"Translating MCQs to {mcq_translate_lang}..."):
-                translated_items = _translate_mcq_items(mcqs, mcq_translate_lang)
-            st.session_state["translated_mcqs"] = translated_items
-            st.session_state["mcqs_translated_lang"] = mcq_translate_lang
-            if mcq_translate_lang == "English":
-                st.success("MCQs reset to English content.")
-            else:
-                st.success(f"Translated MCQs to {mcq_translate_lang}.")
-
     if mcqs:
         topic_name = st.session_state.get("mcqs_topic", "Topic")
-        st.success(f"Generated {len(mcqs)} MCQs on '{topic_name}'")
-        docx_content = [f"MCQs on: {topic_name}", ""]
+        current_lang = st.session_state.get("mcqs_translated_lang", mcq_translate_lang)
+        st.success(f"Generated {len(mcqs)} MCQs on '{topic_name}' in {current_lang}")
+        
+        # Get translated items if available
         translated_items = None
         if (
             st.session_state.get("translated_mcqs")
@@ -220,62 +191,77 @@ with tab3:
         ):
             translated_items = st.session_state.get("translated_mcqs")
 
+        # Prepare DOCX content - only include translated content if available
+        docx_content = [f"MCQs on: {topic_name} ({current_lang})", ""]
+        
+        # Display and prepare content
         for idx, mcq in enumerate(mcqs, start=1):
-            st.markdown(
-                f"<div style='background:#f7f9fc;padding:1rem;border-left:4px solid #4CAF50;border-radius:8px;margin-bottom:1rem;'><b>Q{idx}.</b> {mcq.get('question','')}</div>",
-                unsafe_allow_html=True,
-            )
-            options = _iter_options(mcq.get("options"))
-            for letter, text in options:
-                st.write(f"- {letter}. {text}")
-                docx_content.append(f"{letter}. {text}")
-
-            with st.expander("Answer & Explanation"):
-                st.write(f"**Answer:** {mcq.get('correct_answer','')}")
-                st.write(f"**Explanation:** {mcq.get('explanation','')}")
-
-            translated_block = None
+            # Use translated content if available, otherwise use original
             if translated_items and idx - 1 < len(translated_items):
                 translated_block = translated_items[idx - 1]
-
-            if translated_block and mcq_translate_lang != "English":
+                # Display translated version
                 st.markdown(
-                    f"<div style='background:#eef7ff;padding:0.75rem;border-left:4px solid #2196F3;border-radius:8px;margin:0 0 1rem 1rem;'>"
-                    f"<b>[{mcq_translate_lang}] Q{idx}.</b> {translated_block.get('question','')}</div>",
+                    f"<div style='background:#eef7ff;padding:0.75rem;border-left:4px solid #2196F3;border-radius:8px;margin-bottom:1rem;'>"
+                    f"<b>Q{idx}.</b> {translated_block.get('question','')}</div>",
                     unsafe_allow_html=True,
                 )
                 for opt in translated_block.get("options", []):
                     st.write(f"- {opt['label']}. {opt['text']}")
-                with st.expander(f"Answer & Explanation ({mcq_translate_lang})"):
+                with st.expander("Answer & Explanation"):
                     st.write(f"**Answer:** {translated_block.get('answer','')}")
                     st.write(f"**Explanation:** {translated_block.get('explanation','')}")
-
-            docx_content.extend(
-                [
-                    "",
-                    f"Question {idx}: {mcq.get('question','')}",
-                    f"Correct Answer: {mcq.get('correct_answer','')}",
-                    f"Explanation: {mcq.get('explanation','')}",
-                    "═══",
-                ]
-            )
-
-            if translated_block and mcq_translate_lang != "English":
+                
+                # Add only translated content to DOCX
                 docx_content.extend(
                     [
-                        f"[{mcq_translate_lang}] Question {idx}: {translated_block.get('question','')}",
-                        f"[{mcq_translate_lang}] Answer: {translated_block.get('answer','')}",
-                        f"[{mcq_translate_lang}] Explanation: {translated_block.get('explanation','')}",
+                        f"Question {idx}: {translated_block.get('question','')}",
+                    ]
+                )
+                for opt in translated_block.get("options", []):
+                    docx_content.append(f"{opt['label']}. {opt['text']}")
+                docx_content.extend(
+                    [
+                        f"Correct Answer: {translated_block.get('answer','')}",
+                        f"Explanation: {translated_block.get('explanation','')}",
+                        "═══",
+                    ]
+                )
+            else:
+                # Display original English version
+                st.markdown(
+                    f"<div style='background:#f7f9fc;padding:1rem;border-left:4px solid #4CAF50;border-radius:8px;margin-bottom:1rem;'><b>Q{idx}.</b> {mcq.get('question','')}</div>",
+                    unsafe_allow_html=True,
+                )
+                options = _iter_options(mcq.get("options"))
+                for letter, text in options:
+                    st.write(f"- {letter}. {text}")
+                with st.expander("Answer & Explanation"):
+                    st.write(f"**Answer:** {mcq.get('correct_answer','')}")
+                    st.write(f"**Explanation:** {mcq.get('explanation','')}")
+                
+                # Add original content to DOCX
+                docx_content.extend(
+                    [
+                        f"Question {idx}: {mcq.get('question','')}",
+                    ]
+                )
+                options = _iter_options(mcq.get("options"))
+                for letter, text in options:
+                    docx_content.append(f"{letter}. {text}")
+                docx_content.extend(
+                    [
+                        f"Correct Answer: {mcq.get('correct_answer','')}",
+                        f"Explanation: {mcq.get('explanation','')}",
                         "═══",
                     ]
                 )
 
-        docx_bytes = create_docx("\n".join(docx_content), f"MCQs - {topic_name}")
+        docx_bytes = create_docx("\n".join(docx_content), f"MCQs - {topic_name} ({current_lang})")
         if docx_bytes:
             st.download_button(
                 "📥 Download MCQs (DOCX)",
                 data=docx_bytes,
-                file_name=f"mcqs_{topic_name.replace(' ', '_')}.docx",
+                file_name=f"mcqs_{topic_name.replace(' ', '_')}_{current_lang}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
 

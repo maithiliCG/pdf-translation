@@ -2,7 +2,21 @@ import logging
 
 import httpx
 import openai
-from babeldoc.utils.atomic_integer import AtomicInteger
+try:
+    from babeldoc.utils.atomic_integer import AtomicInteger
+except ImportError:
+    import threading
+    class AtomicInteger:
+        def __init__(self, initial_value=0):
+            self._value = initial_value
+            self._lock = threading.Lock()
+        def increment(self):
+            with self._lock:
+                self._value += 1
+                return self._value
+        def get(self):
+            with self._lock:
+                return self._value
 from pdf2zh_next.config.model import SettingsModel
 from pdf2zh_next.translator.base_rate_limiter import BaseRateLimiter
 from pdf2zh_next.translator.base_translator import BaseTranslator

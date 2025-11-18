@@ -14,7 +14,10 @@ import chardet
 import gradio as gr
 import requests
 import yaml
-from babeldoc import __version__ as babeldoc_version
+try:
+    from babeldoc import __version__ as babeldoc_version
+except ImportError:
+    babeldoc_version = "Not installed"
 from gradio_i18n import Translate
 from gradio_pdf import PDF
 

@@ -405,6 +405,15 @@ def _build_solution_docx_text(translated_items, lang_lower: str):
             if option_match:
                 answer_option = option_match.group(1) or option_match.group(2)
         
+        # Find the actual answer text from options if answer_option is available
+        actual_answer_text = None
+        if answer_option and options and isinstance(options, list) and len(options) > 0:
+            for opt in options:
+                opt_label = str(opt.get("label", "")).strip()
+                if str(opt_label) == str(answer_option):
+                    actual_answer_text = _clean_text(opt.get("text", "")).strip()
+                    break
+        
         exp = _clean_text(
             item.get(f"explanation{suffix}", "") or item.get("explanation", "")
         )
@@ -425,14 +434,34 @@ def _build_solution_docx_text(translated_items, lang_lower: str):
                 opt_text = _clean_text(opt.get("text", "")).strip()
                 if opt_text:
                     if answer_option and str(opt_label) == str(answer_option):
-                        lines.append(f"  ✓ {opt_label}) {opt_text}  ← {ans_label}")
+                        lines.append(f"  ✓ {opt_label}) {opt_text}")
                     else:
                         lines.append(f"    {opt_label}) {opt_text}")
             lines.append("")
-        else:
-            if ans:
+        
+        # Show actual answer text instead of "Option X"
+        if actual_answer_text:
+            lines.append(f"{ans_label}: {actual_answer_text}")
+        elif ans:
+            # If we have answer but no actual text, try to clean it
+            cleaned_ans = ans.replace("Option ", "").replace("option ", "").strip()
+            if cleaned_ans and cleaned_ans != ans:
+                # Try to find the option text
+                if options and isinstance(options, list) and len(options) > 0:
+                    for opt in options:
+                        opt_label = str(opt.get("label", "")).strip()
+                        if str(opt_label) == str(cleaned_ans):
+                            actual_answer_text = _clean_text(opt.get("text", "")).strip()
+                            if actual_answer_text:
+                                lines.append(f"{ans_label}: {actual_answer_text}")
+                                break
+                    if not actual_answer_text:
+                        lines.append(f"{ans_label}: {ans}")
+                else:
+                    lines.append(f"{ans_label}: {ans}")
+            else:
                 lines.append(f"{ans_label}: {ans}")
-            lines.append("")
+        lines.append("")
         
         if exp:
             lines.append(f"{exp_label}: {exp}")

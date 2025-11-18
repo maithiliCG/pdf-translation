@@ -12,13 +12,23 @@ from functools import partial
 from logging.handlers import QueueHandler
 from pathlib import Path
 
-from babeldoc.format.pdf.high_level import async_translate as babeldoc_translate
-from babeldoc.format.pdf.translation_config import TranslationConfig as BabelDOCConfig
-from babeldoc.format.pdf.translation_config import (
-    WatermarkOutputMode as BabelDOCWatermarkMode,
-)
-from babeldoc.glossary import Glossary
-from babeldoc.main import create_progress_handler
+try:
+    from babeldoc.format.pdf.high_level import async_translate as babeldoc_translate
+    from babeldoc.format.pdf.translation_config import TranslationConfig as BabelDOCConfig
+    from babeldoc.format.pdf.translation_config import (
+        WatermarkOutputMode as BabelDOCWatermarkMode,
+    )
+    from babeldoc.glossary import Glossary
+    from babeldoc.main import create_progress_handler
+    BABELDOC_AVAILABLE = True
+except ImportError:
+    BABELDOC_AVAILABLE = False
+    babeldoc_translate = None
+    BabelDOCConfig = None
+    BabelDOCWatermarkMode = None
+    Glossary = None
+    create_progress_handler = None
+
 from rich.logging import RichHandler
 
 from pdf2zh_next.config.model import SettingsModel
@@ -126,6 +136,13 @@ def _translate_wrapper(
 
         queue_handler = QueueHandler(logger_queue)
         logging.basicConfig(level=logging.INFO, handlers=[queue_handler])
+
+        if not BABELDOC_AVAILABLE:
+            raise ImportError(
+                "babeldoc is not available. Please install it with: pip install babeldoc>=0.5.7\n"
+                "Note: babeldoc requires Python <3.14. If you're using Python 3.14, "
+                "please use Python 3.13 or 3.12 instead."
+            )
 
         config = create_babeldoc_config(settings, file)
 
@@ -405,6 +422,8 @@ async def _translate_in_subprocess(
 
 
 def _get_glossaries(settings: SettingsModel) -> list[Glossary] | None:
+    if not BABELDOC_AVAILABLE:
+        return None
     glossaries = []
     if not settings.translation.glossaries:
         return None
@@ -416,6 +435,12 @@ def _get_glossaries(settings: SettingsModel) -> list[Glossary] | None:
 
 
 def create_babeldoc_config(settings: SettingsModel, file: Path) -> BabelDOCConfig:
+    if not BABELDOC_AVAILABLE:
+        raise ImportError(
+            "babeldoc is not available. Please install it with: pip install babeldoc>=0.5.7\n"
+            "Note: babeldoc requires Python <3.14. If you're using Python 3.14, "
+            "please use Python 3.13 or 3.12 instead."
+        )
     if not isinstance(settings, SettingsModel):
         raise ValueError(f"{type(settings)} is not SettingsModel")
     translator = get_translator(settings)
@@ -444,6 +469,8 @@ def create_babeldoc_config(settings: SettingsModel, file: Path) -> BabelDOCConfi
 
     table_model = None
     if settings.pdf.translate_table_text:
+        if not BABELDOC_AVAILABLE:
+            raise ImportError("babeldoc is required for table text translation")
         from babeldoc.docvision.table_detection.rapidocr import RapidOCRModel
 
         table_model = RapidOCRModel()

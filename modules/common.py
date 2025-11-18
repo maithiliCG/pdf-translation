@@ -44,30 +44,13 @@ def _call_generative_model(prompt: str, max_attempts: int = 3, cooldown_seconds:
                         retry_delay = int(float(delay_match.group(1))) + 5
                 
                 if attempt < max_attempts:
-                    # User-friendly error message
-                    user_msg = (
-                        f"⚠️ **API Quota Exceeded**\n\n"
-                        f"Your Gemini API free tier daily limit (200 requests/day) has been reached.\n\n"
-                        f"**Solutions:**\n"
-                        f"1. Wait {retry_delay} seconds and try again\n"
-                        f"2. Check your usage: https://ai.dev/usage?tab=rate-limit\n"
-                        f"3. Upgrade to a paid plan for higher limits\n\n"
-                        f"Retrying in {cooldown_seconds} seconds... (Attempt {attempt}/{max_attempts})"
-                    )
-                    if st:
-                        st.warning(user_msg)
+                    # Silently retry without showing warnings to user
                     time.sleep(cooldown_seconds)
                     continue
                 else:
-                    # Final attempt failed
+                    # Final attempt failed - raise error but don't show quota message
                     raise RuntimeError(
-                        f"⚠️ **API Quota Exceeded**\n\n"
-                        f"Your Gemini API free tier daily limit (200 requests/day) has been reached.\n\n"
-                        f"**Please:**\n"
-                        f"1. Wait a few hours for the quota to reset\n"
-                        f"2. Check your usage: https://ai.dev/usage?tab=rate-limit\n"
-                        f"3. Consider upgrading to a paid plan\n\n"
-                        f"Original error: {error_msg}"
+                        f"API request failed after {max_attempts} attempts. Please try again later."
                     )
             break
     

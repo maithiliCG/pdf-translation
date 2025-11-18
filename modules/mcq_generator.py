@@ -9,11 +9,18 @@ from modules.common import _call_generative_model, create_docx
 
 
 def generate_mcqs(topic, num_questions=5, language="English"):
-    """Generate MCQs on a given topic."""
-    prompt = f"""
+    """Generate MCQs on a given topic in the specified language."""
+    if language == "English":
+        prompt = f"""
 Generate {num_questions} high-quality MCQs on "{topic}".
 Return JSON array with fields question, options, correct_answer, explanation.
-Language: {language}.
+Language: English.
+"""
+    else:
+        prompt = f"""
+Generate {num_questions} high-quality MCQs on "{topic}" in {language} language.
+Return JSON array with fields question, options, correct_answer, explanation.
+All content must be in {language} language.
 """
     response = _call_generative_model(prompt)
     return response.text
