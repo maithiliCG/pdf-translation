@@ -157,6 +157,195 @@ def _pipeline_solve_pages(pages, job_dir: Path, progress_callback=None):
     combined_text = "\n".join(page.get("text", "") for page in pages if page.get("text"))
     answer_key, key_start = _extract_answer_key_from_text(combined_text)
     questions_text = combined_text if key_start is None else combined_text[:key_start]
+    
+    # Use new comprehensive prompt to solve all questions at once
+    char_limit = 50000  # Limit to avoid token limits
+    pdf_text_truncated = questions_text[:char_limit] if len(questions_text) > char_limit else questions_text
+    
+    prompt = f"""
+You are an expert MCQ solver. Analyze ALL questions in the PDF and provide CONCISE, ACCURATE solutions for EVERY question.
+
+**CRITICAL REQUIREMENTS:**
+
+1. IDENTIFY AND PRESERVE section headers/titles from the PDF
+
+2. Group questions under their respective sections
+
+3. Solve ALL questions - don't stop halfway
+
+4. Keep explanations CONCISE (3-5 lines maximum per question)
+
+5. Trust the given options - one of them is correct
+
+6. Show key calculation steps only
+
+7. Use CLEAN formatting with clear separation
+
+**OUTPUT FORMAT (Use EXACTLY this structure):**
+
+========================================================================
+
+SECTION: [Section Name/Title from PDF]
+
+========================================================================
+
+------------------------------------------------------------------------
+
+Question [Number]: [Brief question text]
+
+Options: 1) [ans] | 2) [ans] | 3) [ans] | 4) [ans] | 5) [ans]
+
+CORRECT ANSWER: [Number]) [Answer text]
+
+SOLUTION:
+
+[2-3 line explanation with key steps. For calculations, show: Given -> Formula -> Calculation -> Result]
+
+------------------------------------------------------------------------
+
+[... more questions in this section ...]
+
+========================================================================
+
+SECTION: [Next Section Name/Title from PDF]
+
+========================================================================
+
+------------------------------------------------------------------------
+
+Question [Number]: [Question text]
+
+...
+
+------------------------------------------------------------------------
+
+**EXAMPLE OUTPUT:**
+
+========================================================================
+
+SECTION: QUANTITATIVE APTITUDE
+
+========================================================================
+
+------------------------------------------------------------------------
+
+Question 1: Find ratio of total students in 2012-2013 to 2014-2015
+
+Options: 1) 11:15 | 2) 9:17 | 3) 13:14 | 4) 7:9 | 5) 10:17
+
+CORRECT ANSWER: 2) 9:17
+
+SOLUTION:
+
+2012+2013: (20+30+40)+(30+40+20) = 180 Lakhs
+
+2014+2015: (40+50+30)+(50+40+30) = 240 Lakhs  
+
+Ratio = 180:240 = 9:17
+
+------------------------------------------------------------------------
+
+Question 2: Average MTS vs Average CHSL difference?
+
+Options: 1) 2 | 2) 4 | 3) 6 | 4) 1 | 5) 5
+
+CORRECT ANSWER: 1) 2
+
+SOLUTION:
+
+MTS Total = 180, Avg = 36
+
+CHSL Total = 170, Avg = 34
+
+Difference = 2 Lakhs
+
+------------------------------------------------------------------------
+
+========================================================================
+
+SECTION: LOGICAL REASONING
+
+========================================================================
+
+------------------------------------------------------------------------
+
+Question 15: If P then Q logic problem...
+
+Options: 1) A | 2) B | 3) C | 4) D
+
+CORRECT ANSWER: 2) B
+
+SOLUTION:
+
+Uses Modus Ponens: If P then Q, P is true, therefore Q
+
+------------------------------------------------------------------------
+
+**GUIDELINES:**
+
+- IDENTIFY section headers (they might be like "Quantitative Ability", "Reasoning", "English", "Data Interpretation", etc.)
+
+- Group questions under appropriate section headers
+
+- If no clear sections exist, create logical groups like "SECTION 1", "SECTION 2"
+
+- Solve ALL questions in ALL sections
+
+- Keep each solution under 5 lines
+
+- Show formula/key steps only
+
+- For series: show pattern (e.g., x2+5, +13, etc.)
+
+- For calculations: show main steps only
+
+- Recognize both formats: A,B,C,D OR 1,2,3,4,5
+
+- Use double lines (========) for section separators
+
+- Use single lines (--------) for question separators
+
+- Use simple text: "CORRECT ANSWER:" and "SOLUTION:" (NO emojis or symbols)
+
+- NO lengthy explanations about why options are wrong
+
+- Trust that one option IS correct
+
+- Format must be clean and PDF-export friendly
+
+**Document Content:**
+
+{pdf_text_truncated}
+
+Now solve ALL MCQs with proper section organization!
+"""
+    
+    # Try to solve all questions at once with the new prompt
+    try:
+        if progress_callback:
+            progress_callback(0, 1)
+        
+        response = _call_generative_model(prompt)
+        full_solution_text = response.text.strip()
+        
+        # Parse the structured output to extract questions
+        results = _parse_structured_solution(full_solution_text, answer_key)
+        
+        if progress_callback:
+            progress_callback(1, 1)
+        
+        # If we got results, return them
+        if results:
+            solved_file = job_dir / "solved_extracted_data.json"
+            with solved_file.open("w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
+            return results, solved_file
+    
+    except Exception as exc:
+        # Fallback to original method if new approach fails
+        pass
+    
+    # Fallback to original segmentation method
     question_blocks = _segment_questions_from_text(questions_text)
 
     results = []
@@ -200,10 +389,54 @@ def _pipeline_solve_pages(pages, job_dir: Path, progress_callback=None):
                 method = "sympy"
             else:
                 prompt = f"""
-You are an expert exam solver. Read the following question and return JSON with fields
-"answer" and "explanation".
+You are an expert exam solver. Extract and solve every question and MCQ from the text below.
 
-QUESTION:
+For each question:
+
+- Detect the question number if present.
+
+- Copy the full question text exactly as written.
+
+- Identify the correct answer using reasoning.
+
+- If the question is MCQ, DO NOT return "Option 1/2/3/4/5".
+
+  Instead, return the ACTUAL ANSWER TEXT. Example:
+
+  - Correct: "Carbon dioxide"
+
+  - Wrong: "Option C" or "Option 3"
+
+- For non-MCQs, return the solved final answer clearly.
+
+- Provide a concise 2-line explanation for how you got the answer.
+
+Output Format (STRICT):
+
+Return ONLY a valid JSON array:
+
+[
+  {{
+    "question_number": "...",
+    "question_text": "...",
+    "answer": "...",  
+    "explanation": "..."
+  }}
+]
+
+STRICT RULES:
+
+- NO markdown, NO ```json blocks.
+
+- JSON only.
+
+- Do NOT translate or paraphrase questions.
+
+- If options exist, extract the correct option *text*, not the option number.
+
+- Produce the best possible answer with maximum accuracy.
+
+TEXT:
 {block_text}
 """
                 try:
@@ -211,6 +444,12 @@ QUESTION:
                     parsed = extract_inner_json(response.text.strip())
                     if not parsed:
                         parsed = json.loads(extract_json_block(response.text))
+                    
+                    # Handle both array and single object responses
+                    if isinstance(parsed, list) and len(parsed) > 0:
+                        # If array, take the first item (since we're processing one block at a time)
+                        parsed = parsed[0]
+                    
                     answer = parsed.get("answer", "")
                     explanation = parsed.get("explanation", "")
                     method = "gemini"
@@ -258,6 +497,100 @@ QUESTION:
     return results, solved_file
 
 
+def _parse_structured_solution(solution_text: str, answer_key: dict) -> list:
+    """Parse structured solution output into question items."""
+    results = []
+    
+    # Split by section separators
+    sections = re.split(r'={10,}', solution_text)
+    
+    current_section = None
+    question_number = None
+    
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+        
+        # Check if this is a section header
+        section_match = re.match(r'SECTION:\s*(.+)', section, re.IGNORECASE)
+        if section_match:
+            current_section = section_match.group(1).strip()
+            continue
+        
+        # Parse questions in this section
+        questions = re.split(r'-{10,}', section)
+        
+        for question_block in questions:
+            question_block = question_block.strip()
+            if not question_block:
+                continue
+            
+            # Extract question number
+            qnum_match = re.search(r'Question\s+(\d+):', question_block, re.IGNORECASE)
+            if qnum_match:
+                question_number = qnum_match.group(1)
+            
+            # Extract question text
+            qtext_match = re.search(r'Question\s+\d+:\s*(.+?)(?:\n|Options:)', question_block, re.DOTALL | re.IGNORECASE)
+            question_text = qtext_match.group(1).strip() if qtext_match else ""
+            
+            # Extract options
+            options_match = re.search(r'Options:\s*(.+?)(?:\n|CORRECT)', question_block, re.DOTALL | re.IGNORECASE)
+            options_text = options_match.group(1).strip() if options_match else ""
+            options = []
+            if options_text:
+                # Parse options like "1) [ans] | 2) [ans]"
+                option_parts = re.split(r'\s*\|\s*', options_text)
+                for opt_part in option_parts:
+                    opt_match = re.match(r'(\d+)\)\s*(.+)', opt_part.strip())
+                    if opt_match:
+                        options.append({"label": opt_match.group(1), "text": opt_match.group(2).strip()})
+            
+            # Extract correct answer
+            answer_match = re.search(r'CORRECT ANSWER:\s*(\d+)\)\s*(.+)', question_block, re.IGNORECASE)
+            if answer_match:
+                answer_option = answer_match.group(1)
+                answer_text = answer_match.group(2).strip()
+            else:
+                answer_option = None
+                answer_text = ""
+            
+            # Extract solution/explanation
+            solution_match = re.search(r'SOLUTION:\s*(.+?)(?:\n-{10,}|$)', question_block, re.DOTALL | re.IGNORECASE)
+            explanation = solution_match.group(1).strip() if solution_match else ""
+            
+            # Use answer key if available
+            if question_number and answer_key:
+                try:
+                    qnum_int = int(question_number)
+                    opt_digit = answer_key.get(qnum_int)
+                    if opt_digit:
+                        answer_option = opt_digit
+                        selected_option = next((opt for opt in options if opt.get("label") == opt_digit), None)
+                        if selected_option:
+                            answer_text = f"{selected_option['label']}) {selected_option['text']}"
+                        else:
+                            answer_text = f"Option {opt_digit}"
+                except ValueError:
+                    pass
+            
+            if question_number and (question_text or answer_text):
+                results.append({
+                    "question_number": question_number,
+                    "question_text": question_text,
+                    "question_body": question_text,
+                    "options": options,
+                    "answer": answer_text,
+                    "answer_option": answer_option,
+                    "explanation": explanation,
+                    "method": "llm_structured",
+                    "section": current_section,
+                })
+    
+    return results
+
+
 def _pipeline_translate_items(items, target_language: str, job_dir: Path, progress_callback=None):
     """Translate solved items to target language."""
     lang_lower = target_language.lower()
@@ -267,96 +600,264 @@ def _pipeline_translate_items(items, target_language: str, job_dir: Path, progre
     processed = 0
     batch_size = 5
 
-    for batch_start in range(0, len(items), batch_size):
-        batch = items[batch_start : batch_start + batch_size]
-        payload = []
-        for idx, entry in enumerate(batch):
-            item_payload = {
-                "question_number": entry.get("question_number") or f"{batch_start + idx + 1}",
-                "question_body": entry.get("question_body", entry.get("question_text", "")),
-                "options": entry.get("options", []),
-                "answer": entry.get("answer", ""),
-                "answer_option": entry.get("answer_option", ""),
-                "explanation": entry.get("explanation", ""),
-            }
-            payload.append(item_payload)
+    # Build formatted content for translation
+    formatted_content_parts = []
+    for item in items:
+        qnum = item.get("question_number", "")
+        q = item.get("question_body", item.get("question_text", ""))
+        options = item.get("options", [])
+        a = item.get("answer", "")
+        e = item.get("explanation", "")
         
+        # Build formatted content
+        content_lines = []
+        if qnum:
+            content_lines.append(f"Q{qnum}: {q}")
+        else:
+            content_lines.append(f"Q: {q}")
+        
+        if options:
+            opt_text = " | ".join([f"{opt.get('label', '')}) {opt.get('text', '')}" for opt in options])
+            content_lines.append(f"Options: {opt_text}")
+        
+        if a:
+            content_lines.append(f"✅ Answer: {a}")
+        
+        if e:
+            content_lines.append(f"📝 Solution: {e}")
+        
+        content_lines.append("═══")
+        formatted_content_parts.append("\n".join(content_lines))
+    
+    # Combine all content
+    full_content = "\n\n".join(formatted_content_parts)
+    
+    # Translate in chunks if content is too long
+    char_limit = 40000
+    if len(full_content) <= char_limit:
+        # Translate all at once
         prompt = f"""
-Translate the following solved MCQs into {target_language}. Preserve numbers, math symbols,
-and option labels (1), 2), 3), etc.). Return a JSON array where each object contains:
-{{
-  "question_number": "...",
-  "question_body_{lang_lower}": "...",
-  "options_{lang_lower}": [{{"label": "1", "text": "..."}}, {{"label": "2", "text": "..."}}, ...],
-  "answer_{lang_lower}": "...",
-  "explanation_{lang_lower}": "..."
-}}
+Translate the following MCQ solutions to {target_language}.
 
-Input questions:
-{json.dumps(payload, ensure_ascii=False)}
+**CRITICAL INSTRUCTIONS:**
+
+1. Maintain ALL formatting: separators (═══), question numbers, structure
+
+2. Translate question text, options, and explanations
+
+3. Keep mathematical symbols, numbers, and formulas as-is
+
+4. Keep "Q[Number]:", "Options:", "✅ Answer:", "📝 Solution:" labels
+
+5. Ensure natural, fluent translation in {target_language}
+
+6. Preserve line breaks and spacing
+
+**Content to translate:**
+
+{full_content}
+
+**Provide ONLY the translated content, maintaining exact structure.**
 """
-        batch_success = False
         try:
+            if progress_callback:
+                progress_callback(0, total)
             response = _call_generative_model(prompt)
-            parsed = extract_inner_json(response.text.strip())
-            if not parsed:
-                parsed = json.loads(extract_json_block(response.text))
-            if isinstance(parsed, dict):
-                parsed = [parsed]
-            if len(parsed) == len(batch):
-                for original_item, translated_fields in zip(batch, parsed):
-                    merged = {**original_item, **translated_fields}
-                    if f"options_{lang_lower}" not in translated_fields and original_item.get("options"):
-                        merged[f"options_{lang_lower}"] = original_item.get("options")
-                    translated.append(merged)
-                batch_success = True
-            else:
-                batch_success = False
-        except Exception:
-            batch_success = False
-
-        if not batch_success:
+            translated_text = response.text.strip()
+            
+            # Parse translated text back into items
+            translated = _parse_translated_content(translated_text, items, lang_lower)
+            if progress_callback:
+                progress_callback(len(items), total)
+        except Exception as exc:
+            # Fallback to individual item translation
+            translated = _translate_items_individually(items, target_language, lang_lower)
+            if progress_callback:
+                progress_callback(len(items), total)
+    else:
+        # Translate in batches
+        translated = []
+        for batch_start in range(0, len(items), batch_size):
+            batch = items[batch_start : batch_start + batch_size]
+            batch_content_parts = []
             for item in batch:
-                prompt_single = f"""
-Translate the following solved MCQ into {target_language}.
-Keep numbers, symbols, and formulas untouched. Preserve option labels.
-Return output strictly as JSON like:
-{{
-  "question_body_{lang_lower}": "...",
-  "options_{lang_lower}": [{{"label": "1", "text": "..."}}, ...],
-  "answer_{lang_lower}": "...",
-  "explanation_{lang_lower}": "..."
-}}
+                qnum = item.get('question_number', '')
+                qbody = item.get('question_body', item.get('question_text', ''))
+                options = item.get('options', [])
+                answer = item.get('answer', '')
+                explanation = item.get('explanation', '')
+                
+                # Build options string
+                if options:
+                    opt_parts = []
+                    for opt in options:
+                        opt_label = opt.get('label', '')
+                        opt_text = opt.get('text', '')
+                        opt_parts.append(f"{opt_label}) {opt_text}")
+                    options_str = " | ".join(opt_parts)
+                else:
+                    options_str = ""
+                
+                # Build formatted content for this item
+                item_content = f"Q{qnum}: {qbody}\n"
+                if options_str:
+                    item_content += f"Options: {options_str}\n"
+                if answer:
+                    item_content += f"✅ Answer: {answer}\n"
+                if explanation:
+                    item_content += f"📝 Solution: {explanation}\n"
+                item_content += "═══"
+                batch_content_parts.append(item_content)
+            
+            batch_content = "\n\n".join(batch_content_parts)
+            
+            prompt = f"""
+Translate the following MCQ solutions to {target_language}.
 
-Question Body: {item.get("question_body", item.get("question_text", ""))}
-Options: {json.dumps(item.get("options", []), ensure_ascii=False)}
-Answer: {item.get("answer", "")}
-Explanation: {item.get("explanation", "")}
+**CRITICAL INSTRUCTIONS:**
+
+1. Maintain ALL formatting: separators (═══), question numbers, structure
+
+2. Translate question text, options, and explanations
+
+3. Keep mathematical symbols, numbers, and formulas as-is
+
+4. Keep "Q[Number]:", "Options:", "✅ Answer:", "📝 Solution:" labels
+
+5. Ensure natural, fluent translation in {target_language}
+
+6. Preserve line breaks and spacing
+
+**Content to translate:**
+
+{batch_content[:char_limit]}
+
+**Provide ONLY the translated content, maintaining exact structure.**
 """
-                try:
-                    response = _call_generative_model(prompt_single)
-                    parsed = extract_inner_json(response.text.strip())
-                    if parsed:
-                        merged = {**item, **parsed}
-                        if f"options_{lang_lower}" not in parsed and item.get("options"):
-                            merged[f"options_{lang_lower}"] = item.get("options")
-                    else:
-                        merged = {
-                            **item,
-                            f"raw_translation_{lang_lower}": response.text.strip(),
-                        }
-                    translated.append(merged)
-                except Exception as exc:
-                    item[f"translation_error_{lang_lower}"] = str(exc)
-                    translated.append(item)
-        processed += len(batch)
-        if progress_callback:
-            progress_callback(processed, total)
+            try:
+                response = _call_generative_model(prompt)
+                translated_text = response.text.strip()
+                batch_translated = _parse_translated_content(translated_text, batch, lang_lower)
+                translated.extend(batch_translated)
+            except Exception as exc:
+                # Fallback to individual item translation for this batch
+                batch_translated = _translate_items_individually(batch, target_language, lang_lower)
+                translated.extend(batch_translated)
+            
+            processed += len(batch)
+            if progress_callback:
+                progress_callback(processed, total)
 
     with translated_path.open("w", encoding="utf-8") as f:
         json.dump(translated, f, ensure_ascii=False, indent=2)
 
     return translated, translated_path
+
+
+def _parse_translated_content(translated_text: str, original_items: list, lang_lower: str) -> list:
+    """Parse translated formatted content back into item structure."""
+    translated_items = []
+    
+    # Split by separator
+    question_blocks = re.split(r'═{3,}', translated_text)
+    
+    for idx, (block, original_item) in enumerate(zip(question_blocks, original_items)):
+        if not block.strip():
+            translated_items.append(original_item)
+            continue
+        
+        block = block.strip()
+        
+        # Extract question number and text
+        qnum_match = re.search(r'Q(\d+):\s*(.+?)(?:\n|Options:)', block, re.DOTALL | re.IGNORECASE)
+        if qnum_match:
+            question_text = qnum_match.group(2).strip()
+        else:
+            q_match = re.search(r'Q:\s*(.+?)(?:\n|Options:)', block, re.DOTALL | re.IGNORECASE)
+            question_text = q_match.group(1).strip() if q_match else ""
+        
+        # Extract options
+        options_match = re.search(r'Options:\s*(.+?)(?:\n|✅)', block, re.DOTALL | re.IGNORECASE)
+        options = []
+        if options_match:
+            options_text = options_match.group(1).strip()
+            # Parse options like "1) text | 2) text"
+            opt_parts = re.split(r'\s*\|\s*', options_text)
+            for opt_part in opt_parts:
+                opt_match = re.match(r'(\d+)\)\s*(.+)', opt_part.strip())
+                if opt_match:
+                    options.append({"label": opt_match.group(1), "text": opt_match.group(2).strip()})
+        
+        # Extract answer
+        answer_match = re.search(r'✅\s*Answer:\s*(.+?)(?:\n|📝)', block, re.DOTALL | re.IGNORECASE)
+        answer = answer_match.group(1).strip() if answer_match else ""
+        
+        # Extract solution/explanation
+        solution_match = re.search(r'📝\s*Solution:\s*(.+?)(?:\n|═|$)', block, re.DOTALL | re.IGNORECASE)
+        explanation = solution_match.group(1).strip() if solution_match else ""
+        
+        # Build translated item
+        translated_item = {**original_item}
+        translated_item[f"question_text_{lang_lower}"] = question_text
+        translated_item[f"question_body_{lang_lower}"] = question_text
+        if options:
+            translated_item[f"options_{lang_lower}"] = options
+        translated_item[f"answer_{lang_lower}"] = answer
+        translated_item[f"explanation_{lang_lower}"] = explanation
+        
+        translated_items.append(translated_item)
+    
+    # Handle case where we have more blocks than items (shouldn't happen, but safety)
+    while len(translated_items) < len(original_items):
+        translated_items.append(original_items[len(translated_items)])
+    
+    return translated_items
+
+
+def _translate_items_individually(items: list, target_language: str, lang_lower: str) -> list:
+    """Fallback: Translate items individually."""
+    translated = []
+    for item in items:
+        q = item.get("question_body", item.get("question_text", ""))
+        a = item.get("answer", "")
+        e = item.get("explanation", "")
+        
+        prompt = f"""
+Translate the following solved MCQ into {target_language}.
+
+Keep all numbers, symbols, and math expressions unchanged.
+
+Return output strictly as JSON like:
+{{
+  "question_text_{lang_lower}": "...",
+  "answer_{lang_lower}": "...",
+  "explanation_{lang_lower}": "..."
+}}
+
+Question: {q}
+Answer: {a}
+Explanation: {e}
+"""
+        try:
+            response = _call_generative_model(prompt)
+            parsed = extract_inner_json(response.text.strip())
+            if not parsed:
+                parsed = json.loads(extract_json_block(response.text))
+            if parsed:
+                merged = {**item, **parsed}
+                if f"options_{lang_lower}" not in parsed and item.get("options"):
+                    merged[f"options_{lang_lower}"] = item.get("options")
+            else:
+                merged = {
+                    **item,
+                    f"raw_translation_{lang_lower}": response.text.strip(),
+                }
+            translated.append(merged)
+        except Exception as exc:
+            item[f"translation_error_{lang_lower}"] = str(exc)
+            translated.append(item)
+    
+    return translated
 
 
 def _build_solution_docx_text(translated_items, lang_lower: str):
