@@ -13,7 +13,7 @@ from modules.mcq_generator import (
     _translate_mcq_items,
     _iter_options,
 )
-from modules.pdf_translator import translate_pdf_with_pdf2zh, create_docx_from_pdf
+from modules.pdf_translator import translate_pdf_with_pdf2zh
 from modules.common import create_docx
 
 # Check API key
@@ -53,13 +53,34 @@ st.markdown(
     "Solve PDFs, generate MCQs, and translate full PDFs with layout preservation."
 )
 
+# Check if babeldoc is available for PDF Translator
+try:
+    from pdf2zh_next.high_level import BABELDOC_AVAILABLE
+    pdf_translator_available = BABELDOC_AVAILABLE
+except (ImportError, AttributeError):
+    pdf_translator_available = False
+
+# Always show all three tabs with PDF Translator as first
 tab1, tab2, tab3 = st.tabs(
     ["🌍 PDF Translator", "📄 Solution Generator", "❓ MCQ Generator"]
 )
 
-# Tab 1: PDF Translator
+# Tab 1: PDF Translator (always shown as first tab)
 with tab1:
     st.header("PDF Translator")
+    
+    # Show warning if babeldoc is not available
+    if not pdf_translator_available:
+        st.warning(
+            "⚠️ **PDF Translator Feature Currently Unavailable**\n\n"
+            "The PDF Translator requires the `babeldoc` library, which doesn't support Python 3.14 yet.\n\n"
+            "**To use PDF Translator:**\n"
+            "1. Use Python 3.13 or 3.12 instead of Python 3.14\n"
+            "2. Create a new virtual environment with Python 3.13/3.12\n"
+            "3. Reinstall dependencies\n\n"
+            "**Note:** Solution Generator and MCQ Generator work perfectly with Python 3.14!"
+        )
+    
     translator_file = st.file_uploader("Upload PDF to translate", type="pdf", key="translator_pdf")
     translate_language = st.selectbox(
         "Target language",
@@ -67,18 +88,26 @@ with tab1:
         index=list(LANGUAGES.keys()).index("Hindi"),
     )
 
-    if translator_file and st.button("🔄 Translate PDF"):
-        progress = st.progress(0)
-        status = st.empty()
-        try:
-            result = translate_pdf_with_pdf2zh(translator_file, translate_language, progress, status)
-            st.session_state["pdf_translation_result"] = result
-            st.session_state["translated_pdf_lang"] = translate_language
-            st.success("PDF translated successfully!")
-        except Exception as exc:
-            progress.empty()
-            status.empty()
-            st.error(f"PDF translation failed: {exc}")
+    if translator_file and st.button("🔄 Translate PDF", disabled=not pdf_translator_available):
+        if not pdf_translator_available:
+            st.error("PDF Translator is not available. Please use Python 3.13 or 3.12 to enable this feature.")
+        else:
+            progress = st.progress(0)
+            status = st.empty()
+            try:
+                result = translate_pdf_with_pdf2zh(translator_file, translate_language, progress, status)
+                st.session_state["pdf_translation_result"] = result
+                st.session_state["translated_pdf_lang"] = translate_language
+                st.success("PDF translated successfully!")
+            except Exception as exc:
+                progress.empty()
+                status.empty()
+                error_str = str(exc)
+                # Check if it's a babeldoc error and format it nicely
+                if "PDF Translator Feature Unavailable" in error_str:
+                    st.error(error_str)
+                else:
+                    st.error(f"**PDF translation failed:**\n\n{error_str}")
 
     translation = st.session_state.get("pdf_translation_result")
     if translation:
@@ -87,7 +116,9 @@ with tab1:
         mono = translation.get("mono_pdf_path")
         dual = translation.get("dual_pdf_path")
         lang_code = translation.get("lang_code") or translation.get("lang_label") or "lang"
+        
         col1, col2 = st.columns(2)
+        
         if mono and os.path.exists(mono):
             with col1:
                 st.download_button(

@@ -11,12 +11,13 @@ import fitz  # PyMuPDF
 import streamlit as st
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches
 
 from pdf2zh_next.config.model import SettingsModel
-from pdf2zh_next.config.translate_engine_model import SiliconFlowFreeSettings
+from pdf2zh_next.config.translate_engine_model import SiliconFlowFreeSettings, GeminiSettings
 from pdf2zh_next.high_level import do_translate_async_stream
 
-from config.settings import PDF2ZH_JOBS_ROOT, LANGUAGES
+from config.settings import PDF2ZH_JOBS_ROOT, LANGUAGES, GEMINI_API_KEY
 from modules.common import _write_uploaded_file
 
 
@@ -27,9 +28,26 @@ def _ensure_pdf2zh_job_dir():
     return job_dir
 
 
-def _build_pdf2zh_settings(lang_label: str, output_dir: Path):
-    """Build settings for pdf2zh translation."""
-    settings = SettingsModel(translate_engine_settings=SiliconFlowFreeSettings())
+def _build_pdf2zh_settings(lang_label: str, output_dir: Path, use_gemini: bool = False):
+    """Build settings for pdf2zh translation.
+    
+    Args:
+        lang_label: Target language label
+        output_dir: Output directory for translated files
+        use_gemini: If True, use Gemini translator; otherwise use SiliconFlowFree
+    """
+    if use_gemini:
+        if not GEMINI_API_KEY:
+            raise ValueError("Gemini API key not found. Please set GENAI_API_KEY in your environment.")
+        # Use gemini-2.0-flash to match other modules (MCQ and Solution generators)
+        translate_engine_settings = GeminiSettings(
+            gemini_api_key=GEMINI_API_KEY,
+            gemini_model="gemini-2.0-flash"
+        )
+    else:
+        translate_engine_settings = SiliconFlowFreeSettings()
+    
+    settings = SettingsModel(translate_engine_settings=translate_engine_settings)
     settings.translation.lang_in = "auto"
     settings.translation.lang_out = lang_label
     settings.translation.output = str(output_dir)
@@ -134,28 +152,36 @@ async def _stream_pdf2zh(settings: SettingsModel, pdf_path: Path, progress_callb
 
 
 def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None, status_placeholder=None):
-    """Translate PDF using pdf2zh_next library."""
+    """Translate PDF using pdf2zh_next library with fallback to Gemini.
+    
+    Tries SiliconFlowFree first, then falls back to Gemini if it fails.
+    """
     lang_code = LANGUAGES.get(target_language, target_language)
     lang_label = target_language
     job_dir = _ensure_pdf2zh_job_dir()
     input_pdf = job_dir / uploaded_file.name
     _write_uploaded_file(uploaded_file, input_pdf)
-    settings = _build_pdf2zh_settings(lang_label, job_dir)
-    
-    # Ensure input file is set in settings
-    settings.basic.input_files = {str(input_pdf)}
 
-    def _progress(event):
+    def _progress(event, translator_name="SiliconFlowFree"):
         if not progress_bar:
             return
         overall = min(max(event.get("overall_progress", 0) / 100, 0.0), 1.0)
         stage = event.get("stage", "Processing")
-        progress_bar.progress(overall, text=stage)
+        # Add translator name to progress text
+        progress_text = f"[{translator_name}] {stage}"
+        progress_bar.progress(overall, text=progress_text)
         if status_placeholder:
-            status_placeholder.info(stage)
+            status_placeholder.info(f"Using {translator_name}: {stage}")
 
+    # Try SiliconFlowFree first
     try:
-        result = _run_async(_stream_pdf2zh(settings, input_pdf, _progress))
+        if status_placeholder:
+            status_placeholder.info("🔄 Attempting translation with SiliconFlowFree...")
+        
+        settings = _build_pdf2zh_settings(lang_label, job_dir, use_gemini=False)
+        settings.basic.input_files = {str(input_pdf)}
+        
+        result = _run_async(_stream_pdf2zh(settings, input_pdf, lambda e: _progress(e, "SiliconFlowFree")))
         
         if result is None:
             raise RuntimeError("Translation completed but returned no result.")
@@ -163,7 +189,7 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
         if progress_bar:
             progress_bar.progress(1.0, text="Translation complete!")
         if status_placeholder:
-            status_placeholder.success("Translation complete!")
+            status_placeholder.success("✅ Translation complete using SiliconFlowFree!")
 
         return {
             "job_dir": str(job_dir),
@@ -172,15 +198,74 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
             "lang_code": lang_code,
             "lang_label": lang_label,
         }
-    except Exception as e:
-        error_msg = str(e)
-        if "cannot unpack non-iterable NoneType" in error_msg:
+    
+    except Exception as siliconflow_error:
+        error_msg = str(siliconflow_error)
+        
+        # Check for babeldoc-related errors (these shouldn't be retried)
+        if "babeldoc is not available" in error_msg or "babeldoc" in error_msg.lower():
             raise RuntimeError(
-                f"Translation failed: The translation service returned an unexpected result. "
-                f"This might be due to: 1) Invalid PDF format, 2) Translation service configuration issue, "
-                f"3) Missing translation engine settings. Original error: {error_msg}"
+                "⚠️ **PDF Translator Feature Unavailable**\n\n"
+                "The PDF Translator requires the `babeldoc` library, which is not currently available.\n\n"
+                "**Why?**\n"
+                "You're using Python 3.14, but `babeldoc` only supports Python <3.14.\n\n"
+                "**Solutions:**\n"
+                "1. **Use Python 3.13 or 3.12** (recommended)\n"
+                "   - Create a new virtual environment with Python 3.13/3.12\n"
+                "   - Reinstall dependencies\n"
+                "2. **Wait for babeldoc update** - Check for Python 3.14 support\n\n"
+                "**Note:** The Solution Generator and MCQ Generator features work fine with Python 3.14!"
             )
-        raise
+        
+        # If SiliconFlowFree failed, try Gemini as fallback
+        if not GEMINI_API_KEY:
+            # No fallback available, raise the original error
+            if "cannot unpack non-iterable NoneType" in error_msg:
+                raise RuntimeError(
+                    f"Translation failed: The translation service returned an unexpected result. "
+                    f"This might be due to: 1) Invalid PDF format, 2) Translation service configuration issue, "
+                    f"3) Missing translation engine settings. Original error: {error_msg}"
+                )
+            raise
+        
+        # Try Gemini as fallback
+        try:
+            if status_placeholder:
+                status_placeholder.warning(
+                    f"⚠️ SiliconFlowFree failed: {error_msg[:100]}...\n"
+                    "🔄 Falling back to Gemini API..."
+                )
+            
+            settings = _build_pdf2zh_settings(lang_label, job_dir, use_gemini=True)
+            settings.basic.input_files = {str(input_pdf)}
+            
+            result = _run_async(_stream_pdf2zh(settings, input_pdf, lambda e: _progress(e, "Gemini")))
+            
+            if result is None:
+                raise RuntimeError("Translation completed but returned no result.")
+            
+            if progress_bar:
+                progress_bar.progress(1.0, text="Translation complete!")
+            if status_placeholder:
+                status_placeholder.success("✅ Translation complete using Gemini (fallback)!")
+            
+            return {
+                "job_dir": str(job_dir),
+                "mono_pdf_path": getattr(result, "mono_pdf_path", None) if result else None,
+                "dual_pdf_path": getattr(result, "dual_pdf_path", None) if result else None,
+                "lang_code": lang_code,
+                "lang_label": lang_label,
+            }
+        
+        except Exception as gemini_error:
+            # Both translators failed
+            gemini_error_msg = str(gemini_error)
+            raise RuntimeError(
+                f"❌ Translation failed with both services:\n\n"
+                f"**SiliconFlowFree Error:** {error_msg[:200]}\n\n"
+                f"**Gemini Error:** {gemini_error_msg[:200]}\n\n"
+                f"Please check your PDF file and try again."
+            )
 
 
 def create_docx_from_pdf(pdf_path: str, title: str):
@@ -213,3 +298,44 @@ def create_docx_from_pdf(pdf_path: str, title: str):
         st.error(f"DOCX creation from PDF failed: {exc}")
         return None
 
+
+def create_docx_from_pdf_text(pdf_path: str, title: str):
+    """Create DOCX from PDF by extracting text content."""
+    if not pdf_path or not os.path.exists(pdf_path):
+        return None
+    try:
+        doc = Document()
+        heading = doc.add_heading(title, level=0)
+        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        pdf_doc = fitz.open(pdf_path)
+        
+        for page_num, page in enumerate(pdf_doc, start=1):
+            # Extract text from the page
+            text = page.get_text()
+            
+            if text.strip():
+                # Add page heading
+                doc.add_heading(f"Page {page_num}", level=1)
+                
+                # Split text into paragraphs and add them
+                paragraphs = text.split('\n\n')
+                for para in paragraphs:
+                    para = para.strip()
+                    if para:
+                        # Clean up the paragraph
+                        para = ' '.join(para.split())  # Normalize whitespace
+                        doc.add_paragraph(para)
+                
+                # Add page break except for last page
+                if page_num < len(pdf_doc):
+                    doc.add_page_break()
+        
+        pdf_doc.close()
+        buffer = io.BytesIO()
+        doc.save(buffer)
+        buffer.seek(0)
+        return buffer.getvalue()
+    except Exception as exc:
+        st.error(f"DOCX creation from PDF text failed: {exc}")
+        return None
