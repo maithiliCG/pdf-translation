@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 import google.generativeai as genai
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure
 
 # Load environment variables
 load_dotenv()
@@ -54,4 +56,35 @@ PIPELINE_LABELS = {
     "tamil": ("பதில்", "விரிவுரை", "தமிழில் மொழிபெயர்த்த கேள்வித்தாள்"),
     "kannada": ("ಉತ್ತರ", "ವಿವರಣೆ", "ಕನ್ನಡದಲ್ಲಿ ಅನುವಾದಿತ ಪ್ರಶ್ನೆ ಪತ್ರಿಕೆ"),
 }
+
+# MongoDB Configuration
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017/")
+MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "pdf_translation_db")
+
+# MongoDB Client initialization
+mongodb_client = None
+mongodb_db = None
+
+def get_mongodb_connection():
+    """Get MongoDB connection and database instance"""
+    global mongodb_client, mongodb_db
+    
+    if mongodb_client is None:
+        try:
+            mongodb_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+            # Test connection
+            mongodb_client.admin.command('ping')
+            mongodb_db = mongodb_client[MONGODB_DATABASE]
+            print(f"[OK] MongoDB connected successfully to database: {MONGODB_DATABASE}")
+        except ConnectionFailure as e:
+            print(f"[WARNING] MongoDB connection failed: {e}")
+            print("[INFO] Application will continue without MongoDB storage.")
+            mongodb_client = None
+            mongodb_db = None
+        except Exception as e:
+            print(f"[WARNING] MongoDB error: {e}")
+            mongodb_client = None
+            mongodb_db = None
+    
+    return mongodb_client, mongodb_db
 

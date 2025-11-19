@@ -23,6 +23,16 @@ A Streamlit application for solving PDF question papers, generating MCQs, and tr
 - Advanced PDF processing with layout preservation
 - Outputs monolingual and bilingual PDFs
 
+### 4. MongoDB Integration (Optional)
+- Store input files (uploaded PDFs)
+- Store translation outputs (monolingual and bilingual PDFs)
+- Store solution generation results (DOCX and JSON)
+- Store generated MCQs with metadata
+- Support for both local MongoDB and MongoDB Atlas (cloud)
+- Automatic file storage using GridFS for large files
+
+📖 **See [MONGODB_SETUP.md](MONGODB_SETUP.md) for detailed setup instructions**
+
 ## Quick Start
 
 ### Prerequisites
@@ -65,10 +75,11 @@ PDFMathTranslate-next/
 ├── app.py                    # Main Streamlit application (UI)
 ├── config/                   # Configuration
 │   ├── __init__.py
-│   └── settings.py           # API keys, constants, languages
+│   └── settings.py           # API keys, constants, MongoDB config
 ├── modules/                   # Business logic modules
 │   ├── __init__.py
 │   ├── common.py             # Shared utilities
+│   ├── database_service.py   # MongoDB service layer
 │   ├── solution_generator.py  # Solution Generator module
 │   ├── mcq_generator.py       # MCQ Generator module
 │   └── pdf_translator.py      # PDF Translator module
@@ -77,6 +88,7 @@ PDFMathTranslate-next/
 ├── pyproject.toml             # Package configuration
 ├── Procfile                  # Heroku configuration
 ├── env.example               # Environment variables template
+├── MONGODB_SETUP.md          # MongoDB setup guide
 └── setup.sh & setup.bat      # Setup scripts
 ```
 
@@ -84,8 +96,15 @@ PDFMathTranslate-next/
 
 Create a `.env` file:
 ```env
+# Required: Google Gemini API
 GENAI_API_KEY=your_gemini_api_key_here
+
+# Optional: MongoDB Configuration (for data persistence)
+MONGODB_URI=mongodb://localhost:27017/
+MONGODB_DATABASE=pdf_translation_db
 ```
+
+**Note**: MongoDB is optional. The application works without it, but you won't have data persistence.
 
 ## License
 
