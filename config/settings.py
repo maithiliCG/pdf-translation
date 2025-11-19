@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 import google.generativeai as genai
+from typing import Optional, Tuple
 
 # Load environment variables
 load_dotenv()
@@ -54,4 +55,33 @@ PIPELINE_LABELS = {
     "tamil": ("பதில்", "விரிவுரை", "தமிழில் மொழிபெயர்த்த கேள்வித்தாள்"),
     "kannada": ("ಉತ್ತರ", "ವಿವರಣೆ", "ಕನ್ನಡದಲ್ಲಿ ಅನುವಾದಿತ ಪ್ರಶ್ನೆ ಪತ್ರಿಕೆ"),
 }
+
+# MongoDB Configuration
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "pdf_translation_db")
+
+
+def get_mongodb_connection() -> Tuple[Optional[object], Optional[object]]:
+    """
+    Get MongoDB client and database connection.
+    
+    Returns:
+        Tuple of (client, database). Returns (None, None) if MongoDB is not configured.
+    """
+    if not MONGODB_URI:
+        return None, None
+    
+    try:
+        from pymongo import MongoClient
+        
+        client = MongoClient(MONGODB_URI)
+        db = client[MONGODB_DB_NAME]
+        
+        # Test connection
+        client.admin.command('ping')
+        
+        return client, db
+    except Exception as e:
+        print(f"MongoDB connection error: {e}")
+        return None, None
 

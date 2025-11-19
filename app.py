@@ -3,6 +3,7 @@ PDFMathTranslate - Main Streamlit Application
 AI Study Assistant for solving PDFs, generating MCQs, and translating PDFs
 """
 import os
+from datetime import datetime
 import streamlit as st
 
 from config.settings import LANGUAGES, GEMINI_API_KEY
@@ -13,8 +14,9 @@ from modules.mcq_generator import (
     _translate_mcq_items,
     _iter_options,
 )
-from modules.pdf_translator import translate_pdf_with_pdf2zh
+from modules.pdf_translator import translate_pdf_with_pdf2zh, create_docx_from_pdf
 from modules.common import create_docx
+from modules.database_service import db_service
 
 # Check API key
 if not GEMINI_API_KEY:
@@ -53,34 +55,13 @@ st.markdown(
     "Solve PDFs, generate MCQs, and translate full PDFs with layout preservation."
 )
 
-# Check if babeldoc is available for PDF Translator
-try:
-    from pdf2zh_next.high_level import BABELDOC_AVAILABLE
-    pdf_translator_available = BABELDOC_AVAILABLE
-except (ImportError, AttributeError):
-    pdf_translator_available = False
-
-# Always show all three tabs with PDF Translator as first
 tab1, tab2, tab3 = st.tabs(
     ["🌍 PDF Translator", "📄 Solution Generator", "❓ MCQ Generator"]
 )
 
-# Tab 1: PDF Translator (always shown as first tab)
+# Tab 1: PDF Translator
 with tab1:
     st.header("PDF Translator")
-    
-    # Show warning if babeldoc is not available
-    if not pdf_translator_available:
-        st.warning(
-            "⚠️ **PDF Translator Feature Currently Unavailable**\n\n"
-            "The PDF Translator requires the `babeldoc` library, which doesn't support Python 3.14 yet.\n\n"
-            "**To use PDF Translator:**\n"
-            "1. Use Python 3.13 or 3.12 instead of Python 3.14\n"
-            "2. Create a new virtual environment with Python 3.13/3.12\n"
-            "3. Reinstall dependencies\n\n"
-            "**Note:** Solution Generator and MCQ Generator work perfectly with Python 3.14!"
-        )
-    
     translator_file = st.file_uploader("Upload PDF to translate", type="pdf", key="translator_pdf")
     translate_language = st.selectbox(
         "Target language",
@@ -88,26 +69,56 @@ with tab1:
         index=list(LANGUAGES.keys()).index("Hindi"),
     )
 
-    if translator_file and st.button("🔄 Translate PDF", disabled=not pdf_translator_available):
-        if not pdf_translator_available:
-            st.error("PDF Translator is not available. Please use Python 3.13 or 3.12 to enable this feature.")
-        else:
-            progress = st.progress(0)
-            status = st.empty()
-            try:
-                result = translate_pdf_with_pdf2zh(translator_file, translate_language, progress, status)
-                st.session_state["pdf_translation_result"] = result
-                st.session_state["translated_pdf_lang"] = translate_language
-                st.success("PDF translated successfully!")
-            except Exception as exc:
-                progress.empty()
-                status.empty()
-                error_str = str(exc)
-                # Check if it's a babeldoc error and format it nicely
-                if "PDF Translator Feature Unavailable" in error_str:
-                    st.error(error_str)
-                else:
-                    st.error(f"**PDF translation failed:**\n\n{error_str}")
+    if translator_file and st.button("🔄 Translate PDF"):
+        progress = st.progress(0)
+        status = st.empty()
+        try:
+            result = translate_pdf_with_pdf2zh(translator_file, translate_language, progress, status)
+            st.session_state["pdf_translation_result"] = result
+            st.session_state["translated_pdf_lang"] = translate_language
+            
+            # Store in MongoDB
+            if db_service.is_connected():
+                try:
+                    # Read file data
+                    translator_file.seek(0)
+                    input_data = translator_file.read()
+                    
+                    # Read output files
+                    mono_data = None
+                    dual_data = None
+                    mono_path = result.get("mono_pdf_path")
+                    dual_path = result.get("dual_pdf_path")
+                    
+                    if mono_path and os.path.exists(mono_path):
+                        with open(mono_path, "rb") as f:
+                            mono_data = f.read()
+                    
+                    if dual_path and os.path.exists(dual_path):
+                        with open(dual_path, "rb") as f:
+                            dual_data = f.read()
+                    
+                    # Store in database
+                    job_id = db_service.store_translation(
+                        input_file_data=input_data,
+                        input_filename=translator_file.name,
+                        language=translate_language,
+                        mono_pdf_data=mono_data,
+                        dual_pdf_data=dual_data,
+                        metadata={"lang_code": result.get("lang_code")}
+                    )
+                    
+                    if job_id:
+                        st.session_state["translation_job_id"] = job_id
+                        st.info(f"💾 Stored in database. Job ID: {job_id}")
+                except Exception as db_exc:
+                    st.warning(f"⚠️ Could not store in database: {db_exc}")
+            
+            st.success("PDF translated successfully!")
+        except Exception as exc:
+            progress.empty()
+            status.empty()
+            st.error(f"PDF translation failed: {exc}")
 
     translation = st.session_state.get("pdf_translation_result")
     if translation:
@@ -116,9 +127,7 @@ with tab1:
         mono = translation.get("mono_pdf_path")
         dual = translation.get("dual_pdf_path")
         lang_code = translation.get("lang_code") or translation.get("lang_label") or "lang"
-        
         col1, col2 = st.columns(2)
-        
         if mono and os.path.exists(mono):
             with col1:
                 st.download_button(
@@ -154,6 +163,37 @@ with tab2:
         try:
             result = run_solution_generation_pipeline(solution_file, solution_language, progress, status)
             st.session_state["solution_result"] = result
+            
+            # Store in MongoDB
+            if db_service.is_connected():
+                try:
+                    # Read file data
+                    solution_file.seek(0)
+                    input_data = solution_file.read()
+                    
+                    # Read DOCX file
+                    docx_data = None
+                    docx_path = result.get("final_docx")
+                    if docx_path and os.path.exists(docx_path):
+                        with open(docx_path, "rb") as f:
+                            docx_data = f.read()
+                    
+                    # Store in database
+                    job_id = db_service.store_solution(
+                        input_file_data=input_data,
+                        input_filename=solution_file.name,
+                        language=solution_language,
+                        docx_data=docx_data,
+                        json_data=result.get("json_data"),
+                        metadata={"status": "completed"}
+                    )
+                    
+                    if job_id:
+                        st.session_state["solution_job_id"] = job_id
+                        st.info(f"💾 Stored in database. Job ID: {job_id}")
+                except Exception as db_exc:
+                    st.warning(f"⚠️ Could not store in database: {db_exc}")
+            
             st.success("Pipeline completed successfully!")
         except Exception as exc:
             progress.empty()
@@ -289,6 +329,24 @@ with tab3:
 
         docx_bytes = create_docx("\n".join(docx_content), f"MCQs - {topic_name} ({current_lang})")
         if docx_bytes:
+            # Store in MongoDB
+            if db_service.is_connected() and "mcq_job_id" not in st.session_state:
+                try:
+                    job_id = db_service.store_mcq(
+                        topic=topic_name,
+                        language=current_lang,
+                        num_questions=len(mcqs),
+                        mcq_data=translated_items if translated_items else mcqs,
+                        docx_data=docx_bytes,
+                        metadata={"generated_at": str(datetime.now())}
+                    )
+                    
+                    if job_id:
+                        st.session_state["mcq_job_id"] = job_id
+                        st.info(f"💾 Stored in database. Job ID: {job_id}")
+                except Exception as db_exc:
+                    st.warning(f"⚠️ Could not store in database: {db_exc}")
+            
             st.download_button(
                 "📥 Download MCQs (DOCX)",
                 data=docx_bytes,
