@@ -1,21 +1,19 @@
 """
 MongoDB Database Service for PDF Translation Application
-Handles storing and retrieving files (input, translation, output)
+Stores metadata only (no binary files)
 """
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-import gridfs
 from bson.objectid import ObjectId
 from config.settings import get_mongodb_connection
 
 
 class DatabaseService:
-    """Service class for MongoDB operations"""
+    """Service class for MongoDB operations - metadata only"""
     
     def __init__(self):
-        """Initialize database connection and GridFS"""
+        """Initialize database connection"""
         self.client, self.db = get_mongodb_connection()
-        self.fs = gridfs.GridFS(self.db) if self.db is not None else None
         
         # Initialize collections
         if self.db is not None:
@@ -38,7 +36,7 @@ class DatabaseService:
     
     def is_connected(self) -> bool:
         """Check if MongoDB is connected"""
-        return self.db is not None and self.fs is not None
+        return self.db is not None
     
     # ==== PDF TRANSLATION OPERATIONS ====
     
@@ -52,14 +50,14 @@ class DatabaseService:
         metadata: Optional[Dict] = None
     ) -> Optional[str]:
         """
-        Store a PDF translation job with input and output files
+        Store PDF translation metadata (no binary files)
         
         Args:
-            input_file_data: Original PDF file data
+            input_file_data: Not stored (kept for compatibility)
             input_filename: Name of input file
             language: Target translation language
-            mono_pdf_data: Monolingual translated PDF
-            dual_pdf_data: Bilingual translated PDF
+            mono_pdf_data: Not stored (kept for compatibility)
+            dual_pdf_data: Not stored (kept for compatibility)
             metadata: Additional metadata
             
         Returns:
@@ -69,40 +67,14 @@ class DatabaseService:
             return None
         
         try:
-            # Store input file in GridFS
-            input_file_id = self.fs.put(
-                input_file_data,
-                filename=input_filename,
-                content_type="application/pdf"
-            )
-            
-            # Store output files if provided
-            mono_file_id = None
-            dual_file_id = None
-            
-            if mono_pdf_data:
-                mono_file_id = self.fs.put(
-                    mono_pdf_data,
-                    filename=f"mono_{input_filename}",
-                    content_type="application/pdf"
-                )
-            
-            if dual_pdf_data:
-                dual_file_id = self.fs.put(
-                    dual_pdf_data,
-                    filename=f"dual_{input_filename}",
-                    content_type="application/pdf"
-                )
-            
-            # Create translation document
+            # Create translation document (metadata only)
             translation_doc = {
-                "input_file_id": input_file_id,
                 "input_filename": input_filename,
                 "language": language,
-                "mono_pdf_id": mono_file_id,
-                "dual_pdf_id": dual_file_id,
+                "has_mono_pdf": mono_pdf_data is not None,
+                "has_dual_pdf": dual_pdf_data is not None,
                 "created_at": datetime.utcnow(),
-                "status": "completed" if mono_file_id or dual_file_id else "pending",
+                "status": "completed",
                 "metadata": metadata or {}
             }
             
@@ -127,17 +99,6 @@ class DatabaseService:
             print(f"Error retrieving translation: {e}")
             return None
     
-    def get_file_from_gridfs(self, file_id: ObjectId) -> Optional[bytes]:
-        """Retrieve file data from GridFS"""
-        if not self.is_connected():
-            return None
-        
-        try:
-            grid_out = self.fs.get(file_id)
-            return grid_out.read()
-        except Exception as e:
-            print(f"Error retrieving file: {e}")
-            return None
     
     def list_translations(self, limit: int = 50, language: Optional[str] = None) -> List[Dict]:
         """List recent translations"""
@@ -171,13 +132,13 @@ class DatabaseService:
         metadata: Optional[Dict] = None
     ) -> Optional[str]:
         """
-        Store a solution generation job
+        Store solution generation metadata (no binary files)
         
         Args:
-            input_file_data: Original PDF file data
+            input_file_data: Not stored (kept for compatibility)
             input_filename: Name of input file
             language: Target language
-            docx_data: Generated DOCX file
+            docx_data: Not stored (kept for compatibility)
             json_data: Solution JSON data
             metadata: Additional metadata
             
@@ -188,31 +149,14 @@ class DatabaseService:
             return None
         
         try:
-            # Store input file
-            input_file_id = self.fs.put(
-                input_file_data,
-                filename=input_filename,
-                content_type="application/pdf"
-            )
-            
-            # Store DOCX file if provided
-            docx_file_id = None
-            if docx_data:
-                docx_file_id = self.fs.put(
-                    docx_data,
-                    filename=f"solution_{input_filename.replace('.pdf', '.docx')}",
-                    content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
-            
-            # Create solution document
+            # Create solution document (metadata only)
             solution_doc = {
-                "input_file_id": input_file_id,
                 "input_filename": input_filename,
                 "language": language,
-                "docx_file_id": docx_file_id,
+                "has_docx": docx_data is not None,
                 "json_data": json_data,
                 "created_at": datetime.utcnow(),
-                "status": "completed" if docx_file_id else "pending",
+                "status": "completed",
                 "metadata": metadata or {}
             }
             
@@ -269,14 +213,14 @@ class DatabaseService:
         metadata: Optional[Dict] = None
     ) -> Optional[str]:
         """
-        Store an MCQ generation job
+        Store MCQ generation metadata (no binary files)
         
         Args:
             topic: MCQ topic
             language: Target language
             num_questions: Number of questions
             mcq_data: MCQ data (list of questions)
-            docx_data: Generated DOCX file
+            docx_data: Not stored (kept for compatibility)
             metadata: Additional metadata
             
         Returns:
@@ -286,22 +230,13 @@ class DatabaseService:
             return None
         
         try:
-            # Store DOCX file if provided
-            docx_file_id = None
-            if docx_data:
-                docx_file_id = self.fs.put(
-                    docx_data,
-                    filename=f"mcq_{topic.replace(' ', '_')}_{language}.docx",
-                    content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
-            
-            # Create MCQ document
+            # Create MCQ document (metadata only)
             mcq_doc = {
                 "topic": topic,
                 "language": language,
                 "num_questions": num_questions,
                 "mcq_data": mcq_data,
-                "docx_file_id": docx_file_id,
+                "has_docx": docx_data is not None,
                 "created_at": datetime.utcnow(),
                 "status": "completed",
                 "metadata": metadata or {}
