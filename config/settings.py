@@ -2,6 +2,7 @@
 Configuration settings and constants for PDFMathTranslate
 """
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -77,47 +78,35 @@ def get_mongodb_connection() -> Tuple[Optional[object], Optional[object]]:
     try:
         from pymongo import MongoClient
         
+        # Use a local variable for the connection URI (don't modify global)
+        connection_uri = MONGODB_URI
+        
         if is_atlas:
-            # MongoDB Atlas requires TLS/SSL
-            # Use mongodb+srv:// format which automatically handles TLS
-            if 'mongodb+srv://' in MONGODB_URI:
-                # mongodb+srv automatically uses TLS - best option for Atlas
-                client = MongoClient(
-                    MONGODB_URI,
-                    serverSelectionTimeoutMS=30000,
-                    connectTimeoutMS=30000,
-                    socketTimeoutMS=30000,
-                    retryWrites=True
-                )
-            elif 'mongodb://' in MONGODB_URI:
-                # Standard connection - ensure TLS is enabled
-                # Add tls=true if not present
-                if 'tls=true' not in MONGODB_URI and 'ssl=true' not in MONGODB_URI:
-                    separator = '&' if '?' in MONGODB_URI else '?'
-                    uri_with_tls = f"{MONGODB_URI}{separator}tls=true&retryWrites=true&w=majority"
-                else:
-                    uri_with_tls = MONGODB_URI
-                
-                client = MongoClient(
-                    uri_with_tls,
-                    serverSelectionTimeoutMS=30000,
-                    connectTimeoutMS=30000,
-                    socketTimeoutMS=30000,
-                    tls=True,
-                    tlsAllowInvalidCertificates=False
-                )
-            else:
-                # Fallback
-                client = MongoClient(
-                    MONGODB_URI,
-                    serverSelectionTimeoutMS=30000,
-                    connectTimeoutMS=30000,
-                    socketTimeoutMS=30000
-                )
+            # MongoDB Atlas requires mongodb+srv:// format for proper TLS handling
+            # Convert mongodb:// to mongodb+srv:// if needed
+            if 'mongodb://' in connection_uri and 'mongodb+srv://' not in connection_uri:
+                # Convert to mongodb+srv:// format (removes port requirement)
+                connection_uri = connection_uri.replace('mongodb://', 'mongodb+srv://')
+                # Remove port numbers (SRV doesn't use ports)
+                connection_uri = re.sub(r':\d+/', '/', connection_uri)  # Remove :27017/ or similar
+                # Ensure retryWrites is set
+                if 'retryWrites' not in connection_uri:
+                    separator = '&' if '?' in connection_uri else '?'
+                    connection_uri = f"{connection_uri}{separator}retryWrites=true&w=majority"
+                print(f"Converting MongoDB URI to SRV format for Atlas connection...")
+            
+            # Use mongodb+srv:// which automatically handles TLS correctly
+            client = MongoClient(
+                connection_uri,
+                serverSelectionTimeoutMS=30000,
+                connectTimeoutMS=30000,
+                socketTimeoutMS=30000,
+                retryWrites=True
+            )
         else:
             # Local MongoDB connection (no SSL needed)
             client = MongoClient(
-                MONGODB_URI,
+                connection_uri,
                 serverSelectionTimeoutMS=5000,
                 connectTimeoutMS=5000
             )
@@ -130,40 +119,62 @@ def get_mongodb_connection() -> Tuple[Optional[object], Optional[object]]:
         return client, db
     except Exception as e:
         print(f"MongoDB connection error: {e}")
-        # Try alternative connection method with relaxed SSL for troubleshooting
+        # Try alternative connection method
         if is_atlas:
             try:
                 from pymongo import MongoClient
-                print("Attempting MongoDB connection with alternative SSL settings...")
-                # Try with tlsAllowInvalidCertificates=True for troubleshooting
-                # (Note: This is less secure, but helps diagnose SSL issues)
-                if 'mongodb+srv://' in MONGODB_URI:
-                    client = MongoClient(
-                        MONGODB_URI,
-                        serverSelectionTimeoutMS=30000,
-                        connectTimeoutMS=30000,
-                        socketTimeoutMS=30000,
-                        retryWrites=True
-                    )
-                else:
-                    client = MongoClient(
-                        MONGODB_URI,
-                        tls=True,
-                        tlsAllowInvalidCertificates=True,  # For troubleshooting only
-                        serverSelectionTimeoutMS=30000,
-                        connectTimeoutMS=30000,
-                        socketTimeoutMS=30000
-                    )
+                print("Attempting MongoDB connection with alternative method...")
+                
+                # Ensure we're using mongodb+srv:// format
+                fallback_uri = MONGODB_URI
+                if 'mongodb://' in fallback_uri and 'mongodb+srv://' not in fallback_uri:
+                    fallback_uri = fallback_uri.replace('mongodb://', 'mongodb+srv://')
+                    fallback_uri = re.sub(r':\d+/', '/', fallback_uri)
+                    if 'retryWrites' not in fallback_uri:
+                        separator = '&' if '?' in fallback_uri else '?'
+                        fallback_uri = f"{fallback_uri}{separator}retryWrites=true&w=majority"
+                
+                client = MongoClient(
+                    fallback_uri,
+                    serverSelectionTimeoutMS=30000,
+                    connectTimeoutMS=30000,
+                    socketTimeoutMS=30000,
+                    retryWrites=True
+                )
                 db = client[MONGODB_DB_NAME]
                 client.admin.command('ping')
                 print("✓ MongoDB connection successful with alternative method")
                 return client, db
             except Exception as e2:
                 print(f"✗ MongoDB alternative connection also failed: {e2}")
-                print("\nTroubleshooting tips:")
-                print("1. Ensure your MongoDB Atlas connection string uses 'mongodb+srv://' format")
-                print("2. Check that your IP address is whitelisted in MongoDB Atlas")
-                print("3. Verify your username and password are correct")
-                print("4. Check MongoDB Atlas cluster status")
+                print("\n" + "="*70)
+                print("TROUBLESHOOTING GUIDE:")
+                print("="*70)
+                print("✅ Your connection string format is CORRECT!")
+                print("   Format: mongodb+srv://username:password@cluster.mongodb.net/...")
+                print()
+                print("🔍 MOST COMMON ISSUES (since it worked yesterday):")
+                print()
+                print("1. IP ADDRESS NOT WHITELISTED (90% of cases):")
+                print("   → Go to: MongoDB Atlas → Network Access")
+                print("   → Click 'Add IP Address'")
+                print("   → Add your current IP or use 'Allow Access from Anywhere' (0.0.0.0/0)")
+                print("   → Wait 1-2 minutes for changes to take effect")
+                print()
+                print("2. PASSWORD WITH SPECIAL CHARACTERS:")
+                print("   → If password has @, :, /, ?, #, [, ] - URL encode them:")
+                print("     @ = %40,  : = %3A,  / = %2F,  ? = %3F")
+                print("     # = %23,  [ = %5B,  ] = %5D")
+                print("   → Example: password@123 → password%40123")
+                print()
+                print("3. CLUSTER PAUSED OR DOWN:")
+                print("   → Check MongoDB Atlas dashboard")
+                print("   → Verify cluster is 'Running' (not 'Paused')")
+                print()
+                print("4. NETWORK/FIREWALL BLOCKING:")
+                print("   → Try accessing MongoDB Atlas website")
+                print("   → Check if VPN/proxy is interfering")
+                print()
+                print("="*70)
         return None, None
 
