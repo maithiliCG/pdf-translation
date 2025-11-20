@@ -71,7 +71,14 @@ def get_mongodb_connection():
     
     if mongodb_client is None:
         try:
-            mongodb_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+            # MongoDB Atlas connection with SSL/TLS settings
+            mongodb_client = MongoClient(
+                MONGODB_URI,
+                serverSelectionTimeoutMS=5000,
+                tls=True,
+                tlsAllowInvalidCertificates=True,  # For development - set to False in production
+                retryWrites=True
+            )
             # Test connection
             mongodb_client.admin.command('ping')
             mongodb_db = mongodb_client[MONGODB_DATABASE]
