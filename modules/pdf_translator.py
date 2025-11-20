@@ -14,7 +14,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
 
 from pdf2zh_next.config.model import SettingsModel
-from pdf2zh_next.config.translate_engine_model import GoogleSettings, GeminiSettings
+from pdf2zh_next.config.translate_engine_model import GeminiSettings
 from pdf2zh_next.high_level import do_translate_async_stream
 
 from config.settings import PDF2ZH_JOBS_ROOT, LANGUAGES, GEMINI_API_KEY
@@ -28,25 +28,21 @@ def _ensure_pdf2zh_job_dir():
     return job_dir
 
 
-def _build_pdf2zh_settings(lang_label: str, output_dir: Path, use_gemini: bool = False):
-    """Build settings for pdf2zh translation.
+def _build_pdf2zh_settings(lang_label: str, output_dir: Path):
+    """Build settings for pdf2zh translation using Gemini API.
     
     Args:
         lang_label: Target language label
         output_dir: Output directory for translated files
-        use_gemini: If True, use Gemini translator; otherwise use Google Translate
     """
-    if use_gemini:
-        if not GEMINI_API_KEY:
-            raise ValueError("Gemini API key not found. Please set GENAI_API_KEY in your environment.")
-        # Use gemini-2.0-flash to match other modules (MCQ and Solution generators)
-        translate_engine_settings = GeminiSettings(
-            gemini_api_key=GEMINI_API_KEY,
-            gemini_model="gemini-2.0-flash"
-        )
-    else:
-        # Google Translate library - no API key required
-        translate_engine_settings = GoogleSettings()
+    if not GEMINI_API_KEY:
+        raise ValueError("Gemini API key not found. Please set GENAI_API_KEY in your environment.")
+    
+    # Use gemini-2.0-flash to match other modules (MCQ and Solution generators)
+    translate_engine_settings = GeminiSettings(
+        gemini_api_key=GEMINI_API_KEY,
+        gemini_model="gemini-2.0-flash"
+    )
     
     settings = SettingsModel(translate_engine_settings=translate_engine_settings)
     settings.translation.lang_in = "auto"
@@ -153,9 +149,9 @@ async def _stream_pdf2zh(settings: SettingsModel, pdf_path: Path, progress_callb
 
 
 def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None, status_placeholder=None):
-    """Translate PDF using pdf2zh_next library with fallback to Gemini.
+    """Translate PDF using pdf2zh_next library with Gemini API.
     
-    Tries Google Translate first, then falls back to Gemini if it fails.
+    Uses Gemini API as the primary and only translator.
     """
     lang_code = LANGUAGES.get(target_language, target_language)
     lang_label = target_language
@@ -163,7 +159,7 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
     input_pdf = job_dir / uploaded_file.name
     _write_uploaded_file(uploaded_file, input_pdf)
 
-    def _progress(event, translator_name="Google Translate"):
+    def _progress(event, translator_name="Gemini"):
         if not progress_bar:
             return
         overall = min(max(event.get("overall_progress", 0) / 100, 0.0), 1.0)
@@ -174,15 +170,18 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
         if status_placeholder:
             status_placeholder.info(f"Using {translator_name}: {stage}")
 
-    # Try Google Translate first
+    # Use Gemini API for translation
     try:
         if status_placeholder:
-            status_placeholder.info("🔄 Attempting translation with Google Translate...")
+            status_placeholder.info("🔄 Starting translation with Gemini API...")
         
-        settings = _build_pdf2zh_settings(lang_label, job_dir, use_gemini=False)
+        if not GEMINI_API_KEY:
+            raise ValueError("Gemini API key not found. Please set GENAI_API_KEY in your environment.")
+        
+        settings = _build_pdf2zh_settings(lang_label, job_dir)
         settings.basic.input_files = {str(input_pdf)}
         
-        result = _run_async(_stream_pdf2zh(settings, input_pdf, lambda e: _progress(e, "Google Translate")))
+        result = _run_async(_stream_pdf2zh(settings, input_pdf, lambda e: _progress(e, "Gemini")))
         
         if result is None:
             raise RuntimeError("Translation completed but returned no result.")
@@ -190,7 +189,7 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
         if progress_bar:
             progress_bar.progress(1.0, text="Translation complete!")
         if status_placeholder:
-            status_placeholder.success("✅ Translation complete using Google Translate!")
+            status_placeholder.success("✅ Translation complete using Gemini API!")
 
         return {
             "job_dir": str(job_dir),
@@ -200,10 +199,10 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
             "lang_label": lang_label,
         }
     
-    except Exception as google_error:
-        error_msg = str(google_error)
+    except Exception as error:
+        error_msg = str(error)
         
-        # Check for babeldoc-related errors (these shouldn't be retried)
+        # Check for babeldoc-related errors
         if "babeldoc is not available" in error_msg or "babeldoc" in error_msg.lower():
             raise RuntimeError(
                 "⚠️ **PDF Translator Feature Unavailable**\n\n"
@@ -218,55 +217,19 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
                 "**Note:** The Solution Generator and MCQ Generator features work fine with Python 3.14!"
             )
         
-        # If Google Translate failed, try Gemini as fallback
-        if not GEMINI_API_KEY:
-            # No fallback available, raise the original error
-            if "cannot unpack non-iterable NoneType" in error_msg:
-                raise RuntimeError(
-                    f"Translation failed: The translation service returned an unexpected result. "
-                    f"This might be due to: 1) Invalid PDF format, 2) Translation service configuration issue, "
-                    f"3) Missing translation engine settings. Original error: {error_msg}"
-                )
-            raise
-        
-        # Try Gemini as fallback
-        try:
-            if status_placeholder:
-                status_placeholder.warning(
-                    f"⚠️ Google Translate failed: {error_msg[:100]}...\n"
-                    "🔄 Falling back to Gemini API..."
-                )
-            
-            settings = _build_pdf2zh_settings(lang_label, job_dir, use_gemini=True)
-            settings.basic.input_files = {str(input_pdf)}
-            
-            result = _run_async(_stream_pdf2zh(settings, input_pdf, lambda e: _progress(e, "Gemini")))
-            
-            if result is None:
-                raise RuntimeError("Translation completed but returned no result.")
-            
-            if progress_bar:
-                progress_bar.progress(1.0, text="Translation complete!")
-            if status_placeholder:
-                status_placeholder.success("✅ Translation complete using Gemini (fallback)!")
-            
-            return {
-                "job_dir": str(job_dir),
-                "mono_pdf_path": getattr(result, "mono_pdf_path", None) if result else None,
-                "dual_pdf_path": getattr(result, "dual_pdf_path", None) if result else None,
-                "lang_code": lang_code,
-                "lang_label": lang_label,
-            }
-        
-        except Exception as gemini_error:
-            # Both translators failed
-            gemini_error_msg = str(gemini_error)
+        # Handle other errors
+        if "cannot unpack non-iterable NoneType" in error_msg:
             raise RuntimeError(
-                f"❌ Translation failed with both services:\n\n"
-                f"**Google Translate Error:** {error_msg[:200]}\n\n"
-                f"**Gemini Error:** {gemini_error_msg[:200]}\n\n"
-                f"Please check your PDF file and try again."
+                f"Translation failed: The translation service returned an unexpected result. "
+                f"This might be due to: 1) Invalid PDF format, 2) Translation service configuration issue, "
+                f"3) Missing translation engine settings. Original error: {error_msg}"
             )
+        
+        raise RuntimeError(
+            f"❌ Translation failed:\n\n"
+            f"**Error:** {error_msg[:300]}\n\n"
+            f"Please check your PDF file and Gemini API key, then try again."
+        )
 
 
 def create_docx_from_pdf(pdf_path: str, title: str):
