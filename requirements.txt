@@ -20,9 +20,8 @@ pymongo>=4.0.0
 # pdf2zh_next Essential Dependencies
 # Note: pdf2zh_next is a local package (install with: pip install -e .)
 # These are the core dependencies required for PDF translation:
-# Install opencv-python-headless BEFORE babeldoc to avoid LOADER_DIR error
-# Exclude opencv-python to prevent conflicts (use headless version only)
-opencv-python-headless==4.9.0.80; python_version >= "3.10"  # Pinned version to fix LOADER_DIR NameError
+# Install opencv-python-headless BEFORE babeldoc (babeldoc requires >=4.10.0.84)
+opencv-python-headless>=4.10.0.84  # Required by babeldoc, newer version should fix LOADER_DIR error
 babeldoc>=0.5.7,<0.6.0
 pydantic>=2.10.6
 pydantic-settings>=2.8.1
