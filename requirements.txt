@@ -1,47 +1,34 @@
-# Core dependencies for Streamlit app
+# Core Streamlit Application
 streamlit>=1.28.0
 python-dotenv>=1.0.0
 
-# Note: pdf2zh_next must be installed separately with: pip install -e .
-# (It's a local package, not on PyPI)
-
-# PDF processing
+# PDF Processing
 pymupdf<1.25.3
 
-# AI/ML
+# AI/ML - Google Gemini
 google-generativeai>=0.3.0
+
+# Mathematical Solving
 sympy>=1.13.0
 
-# Document generation
+# Document Generation
 python-docx>=1.1.0
 
-# Database
+# Database (Optional - for metadata storage)
 pymongo>=4.0.0
 
-# pdf2zh_next library dependencies
+# pdf2zh_next Essential Dependencies
+# Note: pdf2zh_next is a local package (install with: pip install -e .)
+# These are the core dependencies required for PDF translation:
+babeldoc>=0.5.7,<0.6.0
+pydantic>=2.10.6
+pydantic-settings>=2.8.1
+httpx>=0.28.1
 requests>=2.31.0
 tqdm>=4.66.0
 tenacity>=8.2.0
 numpy>=1.24.0
-ollama>=0.1.0
-xinference-client>=0.0.1
-deepl>=1.0.0
-openai>=1.0.0
-azure-ai-translation-text<=1.0.1
-gradio<5.36
-tencentcloud-sdk-python-tmt>=3.0.0
-gradio-pdf>=0.0.21
-peewee>=3.17.8
 fontTools>=4.0.0
-babeldoc>=0.5.7,<0.6.0
 rich>=13.0.0
-pydantic-settings>=2.8.1
-pydantic>=2.10.6
-httpx>=0.28.1
-sse-starlette>=2.3.3
-fastapi>=0.115.12
-uvicorn>=0.34.2
 chardet>=5.2.0
-gradio-i18n>=0.3.1
 pyyaml>=6.0.2
-

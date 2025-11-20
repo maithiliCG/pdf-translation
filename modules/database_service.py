@@ -277,10 +277,10 @@ class DatabaseService:
             if input_file_data:
                 input_file_id = self.store_file_metadata(
                     file_data=input_file_data,
-                    filename=input_filename,
+                filename=input_filename,
                     content_type="application/pdf",
                     metadata={"type": "input", "language": language}
-                )
+            )
             
             if docx_data:
                 docx_file_id = self.store_file_metadata(

@@ -14,7 +14,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
 
 from pdf2zh_next.config.model import SettingsModel
-from pdf2zh_next.config.translate_engine_model import SiliconFlowFreeSettings, GeminiSettings
+from pdf2zh_next.config.translate_engine_model import GoogleSettings, GeminiSettings
 from pdf2zh_next.high_level import do_translate_async_stream
 
 from config.settings import PDF2ZH_JOBS_ROOT, LANGUAGES, GEMINI_API_KEY
@@ -34,7 +34,7 @@ def _build_pdf2zh_settings(lang_label: str, output_dir: Path, use_gemini: bool =
     Args:
         lang_label: Target language label
         output_dir: Output directory for translated files
-        use_gemini: If True, use Gemini translator; otherwise use SiliconFlowFree
+        use_gemini: If True, use Gemini translator; otherwise use Google Translate
     """
     if use_gemini:
         if not GEMINI_API_KEY:
@@ -45,7 +45,8 @@ def _build_pdf2zh_settings(lang_label: str, output_dir: Path, use_gemini: bool =
             gemini_model="gemini-2.0-flash"
         )
     else:
-        translate_engine_settings = SiliconFlowFreeSettings()
+        # Google Translate library - no API key required
+        translate_engine_settings = GoogleSettings()
     
     settings = SettingsModel(translate_engine_settings=translate_engine_settings)
     settings.translation.lang_in = "auto"
@@ -154,7 +155,7 @@ async def _stream_pdf2zh(settings: SettingsModel, pdf_path: Path, progress_callb
 def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None, status_placeholder=None):
     """Translate PDF using pdf2zh_next library with fallback to Gemini.
     
-    Tries SiliconFlowFree first, then falls back to Gemini if it fails.
+    Tries Google Translate first, then falls back to Gemini if it fails.
     """
     lang_code = LANGUAGES.get(target_language, target_language)
     lang_label = target_language
@@ -162,7 +163,7 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
     input_pdf = job_dir / uploaded_file.name
     _write_uploaded_file(uploaded_file, input_pdf)
 
-    def _progress(event, translator_name="SiliconFlowFree"):
+    def _progress(event, translator_name="Google Translate"):
         if not progress_bar:
             return
         overall = min(max(event.get("overall_progress", 0) / 100, 0.0), 1.0)
@@ -173,15 +174,15 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
         if status_placeholder:
             status_placeholder.info(f"Using {translator_name}: {stage}")
 
-    # Try SiliconFlowFree first
+    # Try Google Translate first
     try:
         if status_placeholder:
-            status_placeholder.info("🔄 Attempting translation with SiliconFlowFree...")
+            status_placeholder.info("🔄 Attempting translation with Google Translate...")
         
         settings = _build_pdf2zh_settings(lang_label, job_dir, use_gemini=False)
         settings.basic.input_files = {str(input_pdf)}
         
-        result = _run_async(_stream_pdf2zh(settings, input_pdf, lambda e: _progress(e, "SiliconFlowFree")))
+        result = _run_async(_stream_pdf2zh(settings, input_pdf, lambda e: _progress(e, "Google Translate")))
         
         if result is None:
             raise RuntimeError("Translation completed but returned no result.")
@@ -189,7 +190,7 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
         if progress_bar:
             progress_bar.progress(1.0, text="Translation complete!")
         if status_placeholder:
-            status_placeholder.success("✅ Translation complete using SiliconFlowFree!")
+            status_placeholder.success("✅ Translation complete using Google Translate!")
 
         return {
             "job_dir": str(job_dir),
@@ -199,8 +200,8 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
             "lang_label": lang_label,
         }
     
-    except Exception as siliconflow_error:
-        error_msg = str(siliconflow_error)
+    except Exception as google_error:
+        error_msg = str(google_error)
         
         # Check for babeldoc-related errors (these shouldn't be retried)
         if "babeldoc is not available" in error_msg or "babeldoc" in error_msg.lower():
@@ -217,7 +218,7 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
                 "**Note:** The Solution Generator and MCQ Generator features work fine with Python 3.14!"
             )
         
-        # If SiliconFlowFree failed, try Gemini as fallback
+        # If Google Translate failed, try Gemini as fallback
         if not GEMINI_API_KEY:
             # No fallback available, raise the original error
             if "cannot unpack non-iterable NoneType" in error_msg:
@@ -232,7 +233,7 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
         try:
             if status_placeholder:
                 status_placeholder.warning(
-                    f"⚠️ SiliconFlowFree failed: {error_msg[:100]}...\n"
+                    f"⚠️ Google Translate failed: {error_msg[:100]}...\n"
                     "🔄 Falling back to Gemini API..."
                 )
             
@@ -262,7 +263,7 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
             gemini_error_msg = str(gemini_error)
             raise RuntimeError(
                 f"❌ Translation failed with both services:\n\n"
-                f"**SiliconFlowFree Error:** {error_msg[:200]}\n\n"
+                f"**Google Translate Error:** {error_msg[:200]}\n\n"
                 f"**Gemini Error:** {gemini_error_msg[:200]}\n\n"
                 f"Please check your PDF file and try again."
             )

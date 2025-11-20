@@ -1,0 +1,5 @@
+[browser]
+# Disable Streamlit analytics/telemetry data collection
+# This prevents data from being sent to Fivetran webhooks
+gatherUsageStats = false
+
