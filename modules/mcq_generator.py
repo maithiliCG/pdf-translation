@@ -2,25 +2,38 @@
 MCQ Generator Module - Generate and translate multiple-choice questions
 """
 import json
-
-import streamlit as st
+import logging
 
 from modules.common import _call_generative_model, create_docx
 
+logger = logging.getLogger(__name__)
+
 
 def generate_mcqs(topic, num_questions=5, language="English"):
-    """Generate MCQs on a given topic in the specified language."""
-    if language == "English":
-        prompt = f"""
-Generate {num_questions} high-quality MCQs on "{topic}".
-Return JSON array with fields question, options, correct_answer, explanation.
-Language: English.
-"""
-    else:
-        prompt = f"""
-Generate {num_questions} high-quality MCQs on "{topic}" in {language} language.
-Return JSON array with fields question, options, correct_answer, explanation.
-All content must be in {language} language.
+    """Generate MCQs on a given topic directly in the specified language."""
+    prompt = f"""
+Generate {num_questions} high-quality multiple-choice questions (MCQs) on the topic: "{topic}".
+
+IMPORTANT: Generate all content directly in {language} language. Do not generate in English first.
+- Questions must be in {language}
+- All options must be in {language}
+- Correct answer must be in {language}
+- Explanations must be in {language}
+
+Return a valid JSON array with the following structure:
+[
+  {{
+    "question": "Question text in {language}",
+    "options": ["Option 1 in {language}", "Option 2 in {language}", "Option 3 in {language}", "Option 4 in {language}"],
+    "correct_answer": "Correct answer text in {language}",
+    "explanation": "Explanation text in {language}"
+  }}
+]
+
+Ensure:
+- Options array contains exactly 4 string options
+- All text is in {language} language
+- JSON is valid and parseable
 """
     response = _call_generative_model(prompt)
     return response.text
@@ -53,8 +66,8 @@ Text:
         response = _call_generative_model(prompt)
         return (response.text or "").strip()
     except Exception as exc:
-        st.error(f"Translation error: {exc}")
-        return text
+        logger.error(f"Translation error: {exc}")
+        raise RuntimeError(f"Failed to translate text: {exc}") from exc
 
 
 def _iter_options(raw_options):

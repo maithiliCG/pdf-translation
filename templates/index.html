@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="tabs">
+    <button class="tab-button active" onclick="openTab(event, 'pdf-translator')">🌍 PDF Translator</button>
+    <button class="tab-button" onclick="openTab(event, 'solution-generator')">📄 Solution Generator</button>
+    <button class="tab-button" onclick="openTab(event, 'mcq-generator')">❓ MCQ Generator</button>
+</div>
+
+<!-- PDF Translator Tab -->
+<div id="pdf-translator" class="tab-content active">
+    <h2>PDF Translator</h2>
+    <form id="pdf-translate-form" enctype="multipart/form-data">
+        <div class="form-group">
+            <label for="pdf-file">Upload PDF to translate:</label>
+            <input type="file" id="pdf-file" name="file" accept=".pdf" required>
+        </div>
+        <div class="form-group">
+            <label for="pdf-language">Target language:</label>
+            <select id="pdf-language" name="target_language" required>
+                <option value="Hindi">Hindi</option>
+                <option value="Telugu">Telugu</option>
+                <option value="English">English</option>
+                <option value="Bengali">Bengali</option>
+                <option value="Marathi">Marathi</option>
+                <option value="Tamil">Tamil</option>
+                <option value="Gujarati">Gujarati</option>
+                <option value="Kannada">Kannada</option>
+                <option value="Odia">Odia</option>
+                <option value="Malayalam">Malayalam</option>
+                <option value="Punjabi">Punjabi</option>
+                <option value="Assamese">Assamese</option>
+                <option value="Urdu">Urdu</option>
+            </select>
+        </div>
+        <button type="submit" class="btn-primary">🔄 Translate PDF</button>
+    </form>
+    <div id="pdf-result"></div>
+</div>
+
+<!-- Solution Generator Tab -->
+<div id="solution-generator" class="tab-content">
+    <h2>Solution Generator</h2>
+    <p>Upload a PDF question paper to generate solutions.</p>
+    <form id="solution-form" enctype="multipart/form-data">
+        <div class="form-group">
+            <label for="solution-file">Upload question paper PDF:</label>
+            <input type="file" id="solution-file" name="file" accept=".pdf" required>
+        </div>
+        <div class="form-group">
+            <label for="solution-language">Target language:</label>
+            <select id="solution-language" name="target_language" required>
+                <option value="Telugu">Telugu</option>
+                <option value="Hindi">Hindi</option>
+                <option value="English">English</option>
+                <option value="Bengali">Bengali</option>
+                <option value="Marathi">Marathi</option>
+                <option value="Tamil">Tamil</option>
+                <option value="Gujarati">Gujarati</option>
+                <option value="Kannada">Kannada</option>
+                <option value="Odia">Odia</option>
+                <option value="Malayalam">Malayalam</option>
+                <option value="Punjabi">Punjabi</option>
+                <option value="Assamese">Assamese</option>
+                <option value="Urdu">Urdu</option>
+            </select>
+        </div>
+        <button type="submit" class="btn-primary">🚀 Run Solution Pipeline</button>
+    </form>
+    <div id="solution-result"></div>
+</div>
+
+<!-- MCQ Generator Tab -->
+<div id="mcq-generator" class="tab-content">
+    <h2>MCQ Generator</h2>
+    <form id="mcq-form">
+        <div class="form-group">
+            <label for="mcq-topic">Topic:</label>
+            <input type="text" id="mcq-topic" name="topic" placeholder="e.g., Photosynthesis, Algebra, WW-II" required>
+        </div>
+        <div class="form-group">
+            <label for="mcq-count">How many questions?</label>
+            <input type="number" id="mcq-count" name="num_questions" min="1" max="26" value="5" required>
+        </div>
+        <div class="form-group">
+            <label for="mcq-language">Generate MCQs in:</label>
+            <select id="mcq-language" name="language" required>
+                <option value="English">English</option>
+                <option value="Hindi">Hindi</option>
+                <option value="Telugu">Telugu</option>
+                <option value="Bengali">Bengali</option>
+                <option value="Marathi">Marathi</option>
+                <option value="Tamil">Tamil</option>
+                <option value="Gujarati">Gujarati</option>
+                <option value="Kannada">Kannada</option>
+                <option value="Odia">Odia</option>
+                <option value="Malayalam">Malayalam</option>
+                <option value="Punjabi">Punjabi</option>
+                <option value="Assamese">Assamese</option>
+                <option value="Urdu">Urdu</option>
+            </select>
+        </div>
+        <button type="submit" class="btn-primary">🎯 Generate MCQs</button>
+    </form>
+    <div id="mcq-result"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function openTab(evt, tabName) {
+    var i, tabcontent, tablinks;
+    tabcontent = document.getElementsByClassName("tab-content");
+    for (i = 0; i < tabcontent.length; i++) {
+        tabcontent[i].classList.remove("active");
+    }
+    tablinks = document.getElementsByClassName("tab-button");
+    for (i = 0; i < tablinks.length; i++) {
+        tablinks[i].classList.remove("active");
+    }
+    document.getElementById(tabName).classList.add("active");
+    evt.currentTarget.classList.add("active");
+}
+
+// PDF Translator Form
+document.getElementById('pdf-translate-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    const resultDiv = document.getElementById('pdf-result');
+    resultDiv.innerHTML = '<p>Uploading and starting translation...</p>';
+    
+    try {
+        const response = await fetch('/api/pdf/translate', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await response.json();
+        
+        if (response.ok) {
+            window.location.href = `/jobs/${data.job_id}/status`;
+        } else {
+            resultDiv.innerHTML = `<p class="error">Error: ${data.error}</p>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+    }
+});
+
+// Solution Generator Form
+document.getElementById('solution-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    const resultDiv = document.getElementById('solution-result');
+    resultDiv.innerHTML = '<p>Uploading and starting solution generation...</p>';
+    
+    try {
+        const response = await fetch('/api/solution/generate', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await response.json();
+        
+        if (response.ok) {
+            window.location.href = `/jobs/${data.job_id}/status`;
+        } else {
+            resultDiv.innerHTML = `<p class="error">Error: ${data.error}</p>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+    }
+});
+
+// MCQ Generator Form
+document.getElementById('mcq-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    const data = {
+        topic: formData.get('topic'),
+        num_questions: parseInt(formData.get('num_questions')) || 5,
+        language: formData.get('language')
+    };
+    const resultDiv = document.getElementById('mcq-result');
+    resultDiv.innerHTML = '<p>Generating MCQs...</p>';
+    
+    try {
+        const response = await fetch('/api/mcq/generate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(data)
+        });
+        const result = await response.json();
+        
+        if (response.ok) {
+            window.location.href = `/jobs/${result.job_id}/status`;
+        } else {
+            resultDiv.innerHTML = `<p class="error">Error: ${result.error}</p>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+    }
+});
+</script>
+{% endblock %}
+

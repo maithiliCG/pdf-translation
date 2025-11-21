@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+
+{% block title %}Job Status - AI Study Assistant{% endblock %}
+
+{% block content %}
+<h2>Job Status</h2>
+<div id="job-status-container">
+    <div id="job-info">
+        <p><strong>Job ID:</strong> <span id="job-id">{{ job_id }}</span></p>
+    </div>
+    <div id="status-display">
+        <p><strong>Status:</strong> <span id="status">Loading...</span></p>
+        <p><strong>Message:</strong> <span id="message">-</span></p>
+    </div>
+    <div id="progress-container">
+        <div class="progress-bar">
+            <div id="progress-fill" style="width: 0%"></div>
+        </div>
+        <p id="progress-text">0%</p>
+    </div>
+    <div id="process-logs-container" style="display: block;">
+        <h3>Process Logs</h3>
+        <div id="process-logs" style="background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 13px; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word;">
+            <div style="color: #9cdcfe;">Waiting for process to start...</div>
+        </div>
+    </div>
+    <div id="result-container" style="display: none;">
+        <h3>Result</h3>
+        <div id="result-content"></div>
+        <div id="download-links"></div>
+    </div>
+    <div id="error-container" style="display: none;">
+        <h3 class="error">Error</h3>
+        <p id="error-message"></p>
+    </div>
+    <div id="actions">
+        <button onclick="window.location.href='/'" class="btn-secondary">Back to Home</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const jobId = '{{ job_id }}';
+let pollInterval;
+
+let jobType = null;
+
+function formatTime(seconds) {
+    if (seconds < 60) {
+        return `${seconds.toFixed(1)}s`;
+    } else {
+        const mins = Math.floor(seconds / 60);
+        const secs = (seconds % 60).toFixed(1);
+        return `${mins}m ${secs}s`;
+    }
+}
+
+function updateProcessLogs(logs) {
+    const logsContainer = document.getElementById('process-logs');
+    if (!logs || logs.length === 0) {
+        return;
+    }
+    
+    // Get the last 50 logs to avoid too much scrolling
+    const recentLogs = logs.slice(-50);
+    
+    const logsHtml = recentLogs.map(log => {
+        const timeStr = log.time || '';
+        let color = '#d4d4d4'; // default info color
+        
+        if (log.type === 'success') {
+            color = '#4ec9b0'; // green
+        } else if (log.type === 'error') {
+            color = '#f48771'; // red
+        } else if (log.type === 'warning') {
+            color = '#dcdcaa'; // yellow
+        } else if (log.message.includes('extract') || log.message.includes('parsing')) {
+            color = '#4fc1ff'; // blue
+        } else if (log.message.includes('translat')) {
+            color = '#ce9178'; // orange
+        } else if (log.message.includes('render') || log.message.includes('PDF') || log.message.includes('save')) {
+            color = '#c586c0'; // purple
+        }
+        
+        return `<div style="color: ${color}; margin: 2px 0;">${timeStr} ${log.message}</div>`;
+    }).join('');
+    
+    logsContainer.innerHTML = logsHtml;
+    
+    // Auto-scroll to bottom
+    logsContainer.scrollTop = logsContainer.scrollHeight;
+    
+    // Also log to console
+    recentLogs.forEach(log => {
+        const logMsg = `${log.time} ${log.message}`;
+        if (log.type === 'error') {
+            console.error(logMsg);
+        } else if (log.type === 'success') {
+            console.log('%c' + logMsg, 'color: green');
+        } else {
+            console.log(logMsg);
+        }
+    });
+}
+
+function updateStatus(data) {
+    document.getElementById('status').textContent = data.status;
+    document.getElementById('message').textContent = data.message || '-';
+    document.getElementById('progress-text').textContent = `${data.progress}%`;
+    document.getElementById('progress-fill').style.width = `${data.progress}%`;
+    
+    const statusEl = document.getElementById('status');
+    statusEl.className = `status-${data.status}`;
+    
+    // Store job type for later use
+    if (data.type) {
+        jobType = data.type;
+    }
+    
+    // Update process logs
+    if (data.logs && data.logs.length > 0) {
+        updateProcessLogs(data.logs);
+    }
+    
+    if (data.status === 'completed') {
+        clearInterval(pollInterval);
+        showResult(data.result, jobType || data.type);
+    } else if (data.status === 'failed') {
+        clearInterval(pollInterval);
+        showError(data.error);
+    }
+}
+
+function showResult(result, jobType) {
+    const resultContainer = document.getElementById('result-container');
+    const resultContent = document.getElementById('result-content');
+    const downloadLinks = document.getElementById('download-links');
+    
+    resultContainer.style.display = 'block';
+    
+    if (jobType === 'pdf_translation') {
+        resultContent.innerHTML = '<p>PDF translation completed successfully!</p>';
+        downloadLinks.innerHTML = `
+            <a href="/api/jobs/${jobId}/download?type=mono" class="btn-primary">📥 Download Monolingual PDF</a>
+        `;
+    } else if (jobType === 'solution_generation') {
+        resultContent.innerHTML = '<p>Solution generation completed successfully!</p>';
+        downloadLinks.innerHTML = `
+            <a href="/api/jobs/${jobId}/download" class="btn-primary">📥 Download Final DOCX</a>
+        `;
+    } else if (jobType === 'mcq_generation') {
+        resultContent.innerHTML = '<p>MCQ generation completed successfully!</p>';
+        if (result && result.mcqs) {
+            const mcqsHtml = result.mcqs.map((mcq, idx) => `
+                <div class="mcq-item">
+                    <h4>Question ${idx + 1}:</h4>
+                    <p>${mcq.question || mcq['question']}</p>
+                    <ul>
+                        ${(mcq.options || []).map(opt => `<li>${opt.label}. ${opt.text}</li>`).join('')}
+                    </ul>
+                    <p><strong>Answer:</strong> ${mcq.answer || mcq['correct_answer']}</p>
+                    <p><strong>Explanation:</strong> ${mcq.explanation || ''}</p>
+                </div>
+            `).join('');
+            resultContent.innerHTML += `<div class="mcqs-display">${mcqsHtml}</div>`;
+        }
+        downloadLinks.innerHTML = `
+            <a href="/api/jobs/${jobId}/download" class="btn-primary">📥 Download MCQ DOCX</a>
+        `;
+    }
+}
+
+function showError(error) {
+    const errorContainer = document.getElementById('error-container');
+    const errorMessage = document.getElementById('error-message');
+    errorContainer.style.display = 'block';
+    errorMessage.textContent = error || 'An unknown error occurred';
+}
+
+async function pollStatus() {
+    try {
+        const response = await fetch(`/api/jobs/${jobId}/status`);
+        const data = await response.json();
+        
+        if (response.ok) {
+            updateStatus(data);
+        } else {
+            showError(data.error || 'Failed to fetch job status');
+            clearInterval(pollInterval);
+        }
+    } catch (error) {
+        console.error('Error polling status:', error);
+    }
+}
+
+// Start polling
+pollStatus();
+pollInterval = setInterval(pollStatus, 2000); // Poll every 2 seconds
+</script>
+{% endblock %}
+
