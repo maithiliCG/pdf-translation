@@ -2,6 +2,7 @@
 Solution Generator Module - PDF question solving and translation
 """
 import json
+import logging
 import re
 import uuid
 from pathlib import Path
@@ -19,6 +20,365 @@ from modules.common import (
     create_docx,
 )
 
+logger = logging.getLogger(__name__)
+
+JSON_SOLVER_CHAR_LIMIT = 50000
+JSON_SOLVER_PROMPT_TEMPLATE = """
+You are an expert MCQ solver.
+
+Extract EVERY MCQ question from the document text EXACTLY as it appears (question number, wording, options).
+
+{expected_clause}
+
+STRICT RULES:
+1. Return ONLY a valid JSON array. No headings, markdown, narration, or explanations outside JSON.
+2. Include EVERY question. If the document has 35 MCQs, the array must contain 35 objects.
+3. Each object must include question number, section (if available), question text, options array, the correct option label, the correct option text, and a short 2-3 sentence explanation.
+4. The options array must contain objects with "label" and "text".
+5. For the answer, provide both "correct_option" (label such as 1/2/3/4/5 or A/B/C/D) AND "answer_text" (the exact option text).
+6. If sections/headings exist (e.g., "Numerical Ability"), include a "section" field; otherwise set it to null.
+7. If a question number is missing in the PDF, assign a sequential string number yourself (\"31\", \"32\", ...).
+
+OUTPUT FORMAT (MANDATORY):
+[
+  {{
+    "question_number": "31",
+    "section": "NUMERICAL ABILITY",
+    "question_text": "...",
+    "options": [
+      {{"label": "1", "text": "..."}},
+      {{"label": "2", "text": "..."}},
+      {{"label": "3", "text": "..."}},
+      {{"label": "4", "text": "..."}},
+      {{"label": "5", "text": "..."}}
+    ],
+    "correct_option": "3",
+    "answer_text": "13:14",
+    "explanation": "2 concise sentences explaining the reasoning."
+  }}
+]
+
+Document Text:
+{document_text}
+
+Return ONLY raw JSON. Do not add markdown fences.
+"""
+
+
+def _build_json_solver_prompt(document_text: str, expected_count: int | None) -> str:
+    """Build the strict JSON solver prompt."""
+    document_text = document_text.strip()
+    expected_clause = (
+        f"There are exactly {expected_count} MCQ questions in this document. The JSON array MUST contain {expected_count} objects."
+        if expected_count
+        else "Cover EVERY MCQ question that appears in the document. Do not skip any."
+    )
+    return JSON_SOLVER_PROMPT_TEMPLATE.format(
+        expected_clause=expected_clause,
+        document_text=document_text,
+    )
+
+
+def _parse_json_solver_output(raw_text: str) -> list:
+    """Parse JSON array from model response with robust error handling."""
+    if not raw_text:
+        raise ValueError("Empty response from solver")
+    
+    # Try to extract and clean JSON
+    # First, try extract_inner_json (looks for ```json blocks)
+    parsed = extract_inner_json(raw_text)
+    if parsed and isinstance(parsed, list):
+        return parsed
+    
+    # Second, try extract_json_block (more flexible extraction)
+    try:
+        json_block = extract_json_block(raw_text)
+        if json_block:
+            # Clean common LLM JSON issues before parsing
+            json_block = _sanitize_json_string(json_block)
+            parsed = json.loads(json_block)
+            if isinstance(parsed, list):
+                return parsed
+    except json.JSONDecodeError as e:
+        logger.warning(f"JSON decode failed after sanitization: {e}")
+    
+    # Third, try to find JSON array directly in text
+    try:
+        # Look for [ ... ] pattern
+        start_idx = raw_text.find('[')
+        end_idx = raw_text.rfind(']')
+        if start_idx >= 0 and end_idx > start_idx:
+            json_str = raw_text[start_idx:end_idx+1]
+            json_str = _sanitize_json_string(json_str)
+            parsed = json.loads(json_str)
+            if isinstance(parsed, list):
+                return parsed
+    except (json.JSONDecodeError, ValueError) as e:
+        # Show detailed error for diagnosis
+        preview = raw_text[:1000] if len(raw_text) > 1000 else raw_text
+        error_msg = (
+            f"JSON parsing failed: {e}\n\n"
+            f"Response length: {len(raw_text)} characters\n"
+            f"Response preview (first 1000 chars):\n{preview}\n\n"
+            f"This is likely a Gemini formatting issue - check debug_data.gemini_response for full response"
+        )
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    # If we got here, none of the methods worked
+    preview = raw_text[:1000] if len(raw_text) > 1000 else raw_text
+    error_msg = (
+        f"Could not parse valid JSON array from solver output\n\n"
+        f"Response length: {len(raw_text)} characters\n"
+        f"Response preview (first 1000 chars):\n{preview}\n\n"
+        f"Check debug_data.gemini_response for full Gemini output"
+    )
+    raise ValueError(error_msg)
+
+
+def _sanitize_json_string(json_str: str) -> str:
+    """Clean common JSON issues from LLM output."""
+    if not json_str:
+        return json_str
+    
+    # Remove markdown code fences if present
+    json_str = re.sub(r'```json\s*', '', json_str, flags=re.IGNORECASE)
+    json_str = re.sub(r'```\s*$', '', json_str)
+    
+    # Replace control characters in strings (but not structural newlines)
+    # This is tricky - we want to keep JSON structure but clean string values
+    # Simple approach: replace problematic control chars with spaces
+    json_str = re.sub(r'[\x00-\x08\x0b-\x0c\x0e-\x1f]', ' ', json_str)
+    
+    # Fix common trailing comma issues (before ] or })
+    json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+    
+    return json_str.strip()
+
+
+def _normalize_options(options):
+    """Normalize options from solver output into [{'label','text'}]."""
+    normalized = []
+    if not isinstance(options, list):
+        return normalized
+    for opt in options:
+        label = ""
+        text = ""
+        if isinstance(opt, dict):
+            label = opt.get("label") or opt.get("option") or opt.get("id") or opt.get("value_label")
+            text = opt.get("text") or opt.get("value") or opt.get("option_text")
+        elif isinstance(opt, str):
+            match = re.match(r"(\d+|[A-Ea-e])\)?\s*[:.)-]?\s*(.+)", opt.strip())
+            if match:
+                label = match.group(1)
+                text = match.group(2)
+        if label:
+            normalized.append(
+                {
+                    "label": str(label).strip(),
+                    "text": _clean_text(text),
+                }
+            )
+    return normalized
+
+
+def _normalize_json_solver_items(raw_items: list, answer_key: dict | None) -> list:
+    """Convert solver JSON array into internal question objects."""
+    normalized_results = []
+    for idx, item in enumerate(raw_items, start=1):
+        item = item or {}
+        qnum = item.get("question_number") or idx
+        qnum_str = str(qnum).strip()
+        question_text = _clean_text(item.get("question_text") or item.get("question") or "")
+        options = _normalize_options(item.get("options") or [])
+        answer_option = str(item.get("answer_option") or item.get("correct_option") or "").strip()
+        answer_text = _clean_text(item.get("answer_text") or item.get("answer") or "")
+        explanation = _clean_text(item.get("explanation") or item.get("solution") or "")
+        section = item.get("section")
+        if isinstance(section, str):
+            section = section.strip() or None
+        else:
+            section = None
+
+        if not answer_option and options and answer_text:
+            # Try to map answer text to option label
+            for opt in options:
+                if answer_text.lower().strip() == opt["text"].lower().strip():
+                    answer_option = opt["label"]
+                    break
+
+        if not answer_text and answer_option and options:
+            match_opt = next((opt for opt in options if str(opt["label"]) == str(answer_option)), None)
+            if match_opt:
+                answer_text = match_opt["text"]
+
+        # Override with answer key if available
+        try:
+            qnum_int = int(qnum_str)
+        except (TypeError, ValueError):
+            qnum_int = None
+        used_answer_key = False
+        if qnum_int is not None and answer_key:
+            key_opt = answer_key.get(qnum_int)
+            if key_opt:
+                used_answer_key = True
+                answer_option = str(key_opt)
+                match_opt = next((opt for opt in options if str(opt["label"]) == str(answer_option)), None)
+                if match_opt:
+                    answer_text = match_opt["text"]
+                else:
+                    answer_text = f"Option {answer_option}"
+
+        if used_answer_key and answer_text and not explanation:
+            explanation = _generate_llm_explanation(question_text, answer_text)
+
+        answer_value = answer_text or ""
+        if answer_option and answer_text:
+            answer_value = f"{answer_option}) {answer_text}" if ")" not in answer_text else answer_text
+
+        normalized_results.append(
+            {
+                "question_number": qnum_str,
+                "question_text": question_text,
+                "question_body": question_text,
+                "options": options,
+                "answer": answer_value,
+                "answer_option": answer_option or None,
+                "explanation": explanation,
+                "method": "llm_json",
+                "section": section,
+            }
+        )
+    return normalized_results
+
+
+def _format_questions_for_solver(question_blocks: list) -> str:
+    """Build clean question text (Qx / options) for the solver prompt."""
+    lines: list[str] = []
+    for idx, block in enumerate(question_blocks, start=1):
+        qnum = block.get("question_number") or idx
+        
+        # Use raw_block if question_text seems incomplete (too short)
+        qtext = block.get("question_text", "").strip()
+        raw_block = block.get("raw_block", "").strip()
+        
+        # If question_text is missing or seems truncated, use raw_block
+        # Check if raw_block contains more complete text
+        if not qtext or (raw_block and len(raw_block) > len(qtext) + 50):
+            # Extract question text from raw_block (everything before first option)
+            option_pattern = re.compile(r'(?m)^\s*([1-5])[\)\.]\s*', re.MULTILINE)
+            first_option_match = option_pattern.search(raw_block)
+            if first_option_match:
+                qtext = raw_block[:first_option_match.start()].strip()
+            else:
+                # No options found, use raw_block but stop at next question or KEY
+                next_q_match = re.search(r'^\s*\d{2,3}[\.)]|KEY', raw_block, re.MULTILINE)
+                if next_q_match:
+                    qtext = raw_block[:next_q_match.start()].strip()
+                else:
+                    qtext = raw_block
+        
+        qtext = _clean_text(qtext)
+        if not qtext:
+            continue
+        
+        lines.append(f"Question {qnum}: {qtext}")
+        
+        options = block.get("options") or []
+        if options:
+            lines.append("Options:")
+            for opt in options:
+                label = opt.get("label", "").strip()
+                text = _clean_text(opt.get("text", "")).strip()
+                if label and text:
+                    lines.append(f"  {label}) {text}")
+        else:
+            # Try to extract options from raw_block if not found in block
+            if raw_block:
+                option_pattern = re.compile(r'(?m)^\s*([1-5])[\)\.]\s*(.+?)(?=\n\s*[1-5][\)\.]\s*|$|\n\s*\d{2,3}[\.)]|KEY)', re.MULTILINE)
+                opt_matches = list(option_pattern.finditer(raw_block))
+                if opt_matches:
+                    lines.append("Options:")
+                    for opt_match in opt_matches:
+                        label = opt_match.group(1).strip()
+                        text = _clean_text(opt_match.group(2).strip())
+                        if label and text:
+                            lines.append(f"  {label}) {text}")
+        
+        lines.append("")  # Empty line between questions
+    return "\n".join(lines).strip()
+
+
+def _solve_questions_with_json_prompt(
+    solver_input_text: str,
+    expected_count: int | None,
+    expected_numbers: list[str] | None,
+    answer_key: dict,
+    progress_callback=None,
+    job_id: str = None,
+) -> list:
+    """Call Gemini with strict JSON prompt and normalize the result. Single attempt only."""
+    from services.job_manager import job_manager
+    
+    if not solver_input_text.strip():
+        return []
+
+    truncated_text = solver_input_text[:JSON_SOLVER_CHAR_LIMIT]
+
+    prompt = _build_json_solver_prompt(truncated_text, expected_count)
+    
+    # Store prompt sent to Gemini
+    if job_id:
+        job_manager.set_debug_data(job_id, "gemini_prompt", prompt)
+        job_manager.add_log(job_id, "🤖 Sending prompt to Gemini", "info")
+    
+    try:
+        response = _call_generative_model(prompt)
+        raw_text = (response.text or "").strip()
+        
+        # Store raw response from Gemini
+        if job_id:
+            job_manager.set_debug_data(job_id, "gemini_response", raw_text)
+            job_manager.add_log(job_id, f"✅ Received response from Gemini ({len(raw_text)} characters)", "info")
+        
+        parsed_items = _parse_json_solver_output(raw_text)
+        
+        # Store parsed response
+        if job_id:
+            job_manager.set_debug_data(job_id, "gemini_parsed_response", parsed_items)
+            job_manager.add_log(job_id, f"📊 Parsed {len(parsed_items)} questions from response", "info")
+
+        normalized = _normalize_json_solver_items(parsed_items, answer_key)
+
+        # Log coverage information (no validation, just info)
+        if expected_count and job_id:
+            coverage_percent = (len(normalized) / expected_count) * 100
+            job_manager.add_log(job_id, f"📊 Coverage: {len(normalized)}/{expected_count} questions ({coverage_percent:.1f}%)", "info")
+
+        # Log missing question numbers if any (no validation, just info)
+        if expected_numbers and job_id:
+            normalized_numbers = {
+                str(item.get("question_number", "")).strip()
+                for item in normalized
+                if item.get("question_number")
+            }
+            missing_numbers = [
+                num for num in expected_numbers if str(num).strip() not in normalized_numbers
+            ]
+            if missing_numbers:
+                job_manager.add_log(job_id, f"ℹ️ Missing question numbers: {', '.join(map(str, missing_numbers))}", "info")
+
+        if progress_callback:
+            progress_callback(100, 100)
+
+        return normalized
+
+    except Exception as exc:
+        error_message = f"JSON solver failed: {str(exc)}"
+        logger.error(error_message)
+        if job_id:
+            job_manager.add_log(job_id, f"❌ {error_message}", "error")
+        raise RuntimeError(error_message)
 
 def _pipeline_extract_pdf(input_pdf_path: Path, job_dir: Path):
     """Extract text and images from PDF."""
@@ -69,15 +429,82 @@ def _extract_answer_key_from_text(full_text: str) -> tuple[dict[int, str], int |
     return key_map, match.start()
 
 
+def _extract_batch_text_from_raw(full_text: str, batch_blocks: list, first_qnum: str, last_qnum: str) -> str:
+    """Extract the raw text portion corresponding to a batch of questions."""
+    if not batch_blocks:
+        return ""
+    
+    # Find the start position of the first question in the batch
+    first_block = batch_blocks[0]
+    first_raw = first_block.get("raw_block", "")
+    
+    # Try to find the first question number in the full text
+    start_pos = 0
+    if first_qnum:
+        # Look for question number pattern (e.g., "31.", "31)", "31 ")
+        patterns = [
+            rf"\b{re.escape(first_qnum)}\.",
+            rf"\b{re.escape(first_qnum)}\)",
+            rf"\b{re.escape(first_qnum)}\s",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, full_text)
+            if match:
+                start_pos = match.start()
+                break
+    
+    # Find the end position - look for the next question after the last one
+    end_pos = len(full_text)
+    if len(batch_blocks) > 0 and last_qnum:
+        # Try to find the question after the last one in the batch
+        next_qnum = None
+        try:
+            last_qnum_int = int(last_qnum)
+            next_qnum = str(last_qnum_int + 1)
+        except (ValueError, TypeError):
+            pass
+        
+        if next_qnum:
+            patterns = [
+                rf"\b{re.escape(next_qnum)}\.",
+                rf"\b{re.escape(next_qnum)}\)",
+                rf"\b{re.escape(next_qnum)}\s",
+            ]
+            # Search in the remaining text after start_pos
+            remaining_text = full_text[start_pos + 1:]
+            for pattern in patterns:
+                match = re.search(pattern, remaining_text)
+                if match:
+                    # Adjust position back to original text coordinates
+                    end_pos = start_pos + 1 + match.start()
+                    break
+    
+    # Extract the batch text
+    batch_text = full_text[start_pos:end_pos].strip()
+    
+    # If extraction is too short, use the raw blocks combined
+    if len(batch_text) < 100:
+        # Fallback: combine raw blocks
+        batch_text = "\n\n".join(block.get("raw_block", "") for block in batch_blocks if block.get("raw_block"))
+    
+    return batch_text
+
+
 def _segment_questions_from_text(full_text: str):
     """Segment questions from text."""
     if not full_text:
         return []
 
+    # Question pattern: Questions are numbered 31-99+ (2+ digits) at start of line
+    # Options are numbered 1-5 (single digit) at start of line
+    # Look for question numbers that are >= 10 to avoid matching option numbers
     question_pattern = re.compile(
-        r"(?sm)^\s*(\d{1,3})\.\s*(.*?)(?=^\s*\d{1,3}\.\s*|$)"
+        r"(?sm)^\s*(\d{2,3})[\.)]\s*(.*?)(?=^\s*\d{2,3}[\.)]\s*|$)"
     )
-    option_pattern = re.compile(r"(?s)(\d)\)\s*(.*?)(?=(?:\n\s*\d\)|$))")
+    
+    # Option pattern: Single digit (1-5) at start of line, followed by ) or .
+    # This should NOT match at start of line when followed by more digits
+    option_pattern = re.compile(r"(?m)^\s*([1-5])[\)\.]\s*(.+?)(?=\n\s*[1-5][\)\.]\s*|$|\n\s*\d{2,3}[\.)]|KEY)", re.MULTILINE)
 
     blocks = []
     for match in question_pattern.finditer(full_text):
@@ -86,12 +513,38 @@ def _segment_questions_from_text(full_text: str):
         if not raw_block:
             continue
 
+        # Try to find options - look for single digit options (1-5) that are NOT question numbers
         option_matches = list(option_pattern.finditer(raw_block))
+        
+        # Filter out any matches that are actually question numbers (>= 10)
+        filtered_option_matches = []
+        for opt_match in option_matches:
+            opt_num = opt_match.group(1).strip()
+            # Only accept options that are single digit (1-5)
+            if opt_num.isdigit() and 1 <= int(opt_num) <= 5:
+                # Make sure this isn't part of a larger number
+                start_pos = opt_match.start()
+                if start_pos == 0 or not raw_block[start_pos - 1].isdigit():
+                    filtered_option_matches.append(opt_match)
+        
+        option_matches = filtered_option_matches
+        
+        # If still no options, try alternative pattern: "(1) text (2) text"
+        if not option_matches:
+            option_pattern2 = re.compile(r'\(([1-5])\)\s*(.+?)(?=\([1-5]\)|$|\n\s*\d{2,3}[\.)]|KEY)', re.MULTILINE)
+            option_matches = list(option_pattern2.finditer(raw_block))
+        
         if option_matches:
             first_option_start = option_matches[0].start()
             question_prompt = raw_block[:first_option_start].strip()
         else:
-            question_prompt = raw_block.strip()
+            # No options found - use entire block as question text (up to next question or KEY)
+            # Stop at next question number or KEY
+            next_question_match = re.search(r'^\s*\d{2,3}[\.)]|KEY', raw_block, re.MULTILINE)
+            if next_question_match:
+                question_prompt = raw_block[:next_question_match.start()].strip()
+            else:
+                question_prompt = raw_block.strip()
 
         options = [
             {"label": opt.group(1).strip(), "text": opt.group(2).strip()}
@@ -103,7 +556,7 @@ def _segment_questions_from_text(full_text: str):
                 "question_number": number,
                 "question_text": question_prompt,
                 "options": options,
-                "raw_block": raw_block,
+                "raw_block": raw_block,  # Always preserve full raw block
             }
         )
 
@@ -152,450 +605,133 @@ CORRECT ANSWER:
         return f"Explanation unavailable ({exc})."
 
 
-def _pipeline_solve_pages(pages, job_dir: Path, progress_callback=None):
+def _pipeline_solve_pages(pages, job_dir: Path, progress_callback=None, job_id: str = None):
     """Solve questions from PDF pages."""
+    from services.job_manager import job_manager
+    
     combined_text = "\n".join(page.get("text", "") for page in pages if page.get("text"))
+    
+    # Store extracted PDF text
+    if job_id:
+        job_manager.set_debug_data(job_id, "extracted_pdf_text", combined_text)
+        job_manager.add_log(job_id, f"📝 Extracted {len(combined_text)} characters from PDF", "info")
+    
     answer_key, key_start = _extract_answer_key_from_text(combined_text)
     questions_text = combined_text if key_start is None else combined_text[:key_start]
     
-    # Use new comprehensive prompt to solve all questions at once
-    char_limit = 50000  # Limit to avoid token limits
-    pdf_text_truncated = questions_text[:char_limit] if len(questions_text) > char_limit else questions_text
+    # Store questions text (after removing answer key)
+    if job_id:
+        job_manager.set_debug_data(job_id, "questions_text_after_key_removal", questions_text)
+        job_manager.set_debug_data(job_id, "answer_key", answer_key)
+        job_manager.add_log(job_id, f"🔑 Answer key found: {len(answer_key)} questions", "info")
+        job_manager.add_log(job_id, f"📋 Questions text length: {len(questions_text)} characters", "info")
     
-    prompt = f"""
-You are an expert MCQ solver. Analyze ALL questions in the PDF and provide CONCISE, ACCURATE solutions for EVERY question.
-
-**CRITICAL REQUIREMENTS:**
-
-1. IDENTIFY AND PRESERVE section headers/titles from the PDF
-
-2. Group questions under their respective sections
-
-3. Solve ALL questions - d
-
-on't stop halfway
-
-4. Keep explanations CONCISE but COMPLETE (3-5 lines maximum per question)
-   - Show ALL necessary calculation steps to reach the answer
-   - Include both intermediate values and final calculation
-   - For percentage questions: show both values being compared and the percentage formula
-   - For ratio questions: show both parts and the ratio calculation
-   - Never skip steps that are needed to understand how the answer was reached
-
-5. Trust the given options - one of them is correct
-
-6. Show COMPLETE calculation steps (all values and formulas needed to get the answer)
-
-7. Use CLEAN formatting with clear separation
-
-**OUTPUT FORMAT (Use EXACTLY this structure):**
-
-========================================================================
-
-SECTION: [Section Name/Title from PDF]
-
-========================================================================
-
-------------------------------------------------------------------------
-
-Question [Number]: [Brief question text]
-
-Options: 1) [ans] | 2) [ans] | 3) [ans] | 4) [ans] | 5) [ans]
-
-CORRECT ANSWER: [Number]) [Answer text]
-
-SOLUTION:
-
-[3-5 line COMPLETE explanation showing ALL steps. For calculations, show: Given values -> Formula -> All intermediate calculations -> Final result. For percentage/ratio questions, show both values being compared and the complete calculation.]
-
-------------------------------------------------------------------------
-
-[... more questions in this section ...]
-
-========================================================================
-
-SECTION: [Next Section Name/Title from PDF]
-
-========================================================================
-
-------------------------------------------------------------------------
-
-Question [Number]: [Question text]
-
-...
-
-------------------------------------------------------------------------
-
-**EXAMPLE OUTPUT:**
-
-========================================================================
-
-SECTION: QUANTITATIVE APTITUDE
-
-========================================================================
-
-------------------------------------------------------------------------
-
-Question 1: Find ratio of total students in 2012-2013 to 2014-2015
-
-Options: 1) 11:15 | 2) 9:17 | 3) 13:14 | 4) 7:9 | 5) 10:17
-
-CORRECT ANSWER: 2) 9:17
-
-SOLUTION:
-
-2012+2013: (20+30+40)+(30+40+20) = 180 Lakhs
-
-2014+2015: (40+50+30)+(50+40+30) = 240 Lakhs  
-
-Ratio = 180:240 = 9:17
-
-------------------------------------------------------------------------
-
-Question 2: Class B Group X students as percentage of Class C Group Y students?
-
-Options: 1) 120% | 2) 140% | 3) 160% | 4) 125% | 5) 100%
-
-CORRECT ANSWER: 3) 160%
-
-SOLUTION:
-
-Class B, Group X = (8/16) * 80 = 40 students
-
-Class C, Group Y = (6/12) * 50 = 25 students
-
-Percentage = (40/25) * 100 = 160%
-
-------------------------------------------------------------------------
-
-========================================================================
-
-SECTION: LOGICAL REASONING
-
-========================================================================
-
-------------------------------------------------------------------------
-
-Question 15: If P then Q logic problem...
-
-Options: 1) A | 2) B | 3) C | 4) D
-
-CORRECT ANSWER: 2) B
-
-SOLUTION:
-
-Uses Modus Ponens: If P then Q, P is true, therefore Q
-
-------------------------------------------------------------------------
-
-**GUIDELINES:**
-
-- IDENTIFY section headers (they might be like "Quantitative Ability", "Reasoning", "English", "Data Interpretation", etc.)
-
-- Group questions under appropriate section headers
-
-- If no clear sections exist, create logical groups like "SECTION 1", "SECTION 2"
-
-- Solve ALL questions in ALL sections
-
-- Keep each solution under 5 lines but show COMPLETE reasoning
-
-- Show ALL calculation steps needed (don't skip intermediate values)
-
-- For series: show pattern (e.g., x2+5, +13, etc.)
-
-- For calculations: show main steps only
-
-- Recognize both formats: A,B,C,D OR 1,2,3,4,5
-
-- Use double lines (========) for section separators
-
-- Use single lines (--------) for question separators
-
-- Use simple text: "CORRECT ANSWER:" and "SOLUTION:" (NO emojis or symbols)
-
-- NO lengthy explanations about why options are wrong
-
-- Trust that one option IS correct
-
-- Format must be clean and PDF-export friendly
-
-**Document Content:**
-
-{pdf_text_truncated}
-
-Now solve ALL MCQs with proper section organization!
-"""
-    
-    # Try to solve all questions at once with the new prompt
-    try:
-        if progress_callback:
-            progress_callback(0, 1)
-        
-        response = _call_generative_model(prompt)
-        full_solution_text = response.text.strip()
-        
-        # Parse the structured output to extract questions
-        results = _parse_structured_solution(full_solution_text, answer_key)
-        
-        if progress_callback:
-            progress_callback(1, 1)
-        
-        # If we got results, return them
-        if results:
-            solved_file = job_dir / "solved_extracted_data.json"
-            with solved_file.open("w", encoding="utf-8") as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
-            return results, solved_file
-    
-    except Exception as exc:
-        # Fallback to original method if new approach fails
-        pass
-    
-    # Fallback to original segmentation method
     question_blocks = _segment_questions_from_text(questions_text)
-
-    results = []
-    total = len(question_blocks) or 1
-
-    for idx, block in enumerate(question_blocks, start=1):
-        qnum = block.get("question_number", "")
-        options = block.get("options", [])
-        answer = ""
-        answer_option = None
-        explanation = ""
-        method = "answer_key" if answer_key else "llm"
-        used_answer_key = False
-
-        try:
-            qnum_int = int(qnum)
-        except (TypeError, ValueError):
-            qnum_int = None
-
-        if qnum_int is not None and answer_key:
-            opt_digit = answer_key.get(qnum_int)
-            if opt_digit:
-                answer_option = opt_digit
-                selected_option = next(
-                    (opt for opt in options if opt.get("label") == opt_digit), None
+    expected_count = len(question_blocks) or None
+    expected_numbers = (
+        [block.get("question_number") or str(idx) for idx, block in enumerate(question_blocks, start=1)]
+        if question_blocks
+        else None
+    )
+    
+    # Store segmented question blocks metadata (for reference only)
+    if job_id:
+        job_manager.set_debug_data(job_id, "segmented_question_blocks_count", len(question_blocks))
+        job_manager.add_log(job_id, f"📊 Found {len(question_blocks)} questions in text", "info")
+    
+    # BATCH PROCESSING: Split into batches of 10 questions to avoid incomplete JSON from Gemini
+    # Gemini sometimes produces incomplete JSON when response is too long (18K+ chars)
+    BATCH_SIZE = 10
+    all_results = []
+    
+    if question_blocks and len(question_blocks) > 0:
+        total_questions = len(question_blocks)
+        num_batches = (total_questions + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        if job_id:
+            job_manager.add_log(job_id, f"🔄 Processing {total_questions} questions in {num_batches} batches (batch size: {BATCH_SIZE})", "info")
+        
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * BATCH_SIZE
+            end_idx = min(start_idx + BATCH_SIZE, total_questions)
+            batch_blocks = question_blocks[start_idx:end_idx]
+            
+            if job_id:
+                batch_numbers = [block.get("question_number", str(start_idx + i + 1)) for i, block in enumerate(batch_blocks)]
+                job_manager.add_log(job_id, f"📦 Processing batch {batch_idx + 1}/{num_batches}: Questions {batch_numbers[0]}-{batch_numbers[-1]}", "info")
+            
+            # Extract RAW text for this batch from questions_text
+            # Find the position of first question in this batch
+            first_qnum = batch_blocks[0].get("question_number", "")
+            first_qnum_str = str(first_qnum) if first_qnum else ""
+            
+            # Find the position of last question in this batch
+            last_qnum = batch_blocks[-1].get("question_number", "")
+            last_qnum_str = str(last_qnum) if last_qnum else ""
+            
+            # Extract batch text by finding question boundaries in raw text
+            batch_text = _extract_batch_text_from_raw(questions_text, batch_blocks, first_qnum_str, last_qnum_str)
+            
+            if job_id:
+                job_manager.add_log(job_id, f"📤 Sending batch {batch_idx + 1} to Gemini: {len(batch_text)} characters (RAW, NO MODIFICATIONS)", "info")
+            
+            # Solve this batch
+            batch_expected_count = len(batch_blocks)
+            batch_expected_numbers = [block.get("question_number") or str(start_idx + i + 1) for i, block in enumerate(batch_blocks)]
+            
+            try:
+                batch_results = _solve_questions_with_json_prompt(
+                    batch_text,
+                    batch_expected_count,
+                    batch_expected_numbers,
+                    answer_key or {},
+                    progress_callback=None,  # Don't pass main callback for batches
+                    job_id=job_id,
                 )
-                if selected_option:
-                    answer = f"{selected_option['label']}) {selected_option['text']}"
+                
+                if batch_results:
+                    all_results.extend(batch_results)
+                    if job_id:
+                        job_manager.add_log(job_id, f"✅ Batch {batch_idx + 1} completed: {len(batch_results)} questions solved", "success")
                 else:
-                    answer = f"Option {opt_digit}"
-                used_answer_key = True
-                method = "answer_key"
-
-        block_text = block.get("raw_block", "")
-
-        if not answer:
-            sympy_solution = _solve_simple_equation(block_text)
-            if sympy_solution:
-                answer = str(sympy_solution)
-                explanation = "Solved automatically with SymPy."
-                method = "sympy"
-            else:
-                prompt = f"""
-You are an expert exam solver. Extract and solve every question and MCQ from the text below.
-
-For each question:
-
-- Detect the question number if present.
-
-- Copy the full question text exactly as written.
-
-- Identify the correct answer using reasoning.
-
-- If the question is MCQ, DO NOT return "Option 1/2/3/4/5".
-
-  Instead, return the ACTUAL ANSWER TEXT. Example:
-
-  - Correct: "Carbon dioxide"
-
-  - Wrong: "Option C" or "Option 3"
-
-- For non-MCQs, return the solved final answer clearly.
-
-- Provide a concise 2-line explanation for how you got the answer.
-
-Output Format (STRICT):
-
-Return ONLY a valid JSON array:
-
-[
-  {{
-    "question_number": "...",
-    "question_text": "...",
-    "answer": "...",  
-    "explanation": "..."
-  }}
-]
-
-STRICT RULES:
-
-- NO markdown, NO ```json blocks.
-
-- JSON only.
-
-- Do NOT translate or paraphrase questions.
-
-- If options exist, extract the correct option *text*, not the option number.
-
-- Produce the best possible answer with maximum accuracy.
-
-TEXT:
-{block_text}
-"""
-                try:
-                    response = _call_generative_model(prompt)
-                    parsed = extract_inner_json(response.text.strip())
-                    if not parsed:
-                        parsed = json.loads(extract_json_block(response.text))
-                    
-                    # Handle both array and single object responses
-                    if isinstance(parsed, list) and len(parsed) > 0:
-                        # If array, take the first item (since we're processing one block at a time)
-                        parsed = parsed[0]
-                    
-                    answer = parsed.get("answer", "")
-                    explanation = parsed.get("explanation", "")
-                    method = "gemini"
-                except Exception as exc:
-                    answer = ""
-                    explanation = f"Failed to solve: {exc}"
-                    method = "error"
-
-        question_body = block.get("question_text", "").strip()
-        
-        # Build formatted question with options for display
-        question_lines = []
-        if question_body:
-            question_lines.append(question_body)
-        if options:
-            for opt in options:
-                question_lines.append(f"{opt['label']}) {opt['text']}")
-        formatted_question = "\n".join(line for line in question_lines if line).strip()
-
-        if used_answer_key and answer:
-            explanation = _generate_llm_explanation(
-                formatted_question or block_text, answer
-            )
-
-        results.append(
-            {
-                "question_number": qnum,
-                "question_text": formatted_question or block.get("raw_block", ""),
-                "question_body": question_body or block.get("question_text", "").strip(),
-                "options": options if options else [],
-                "answer": answer,
-                "answer_option": answer_option,
-                "explanation": explanation,
-                "method": method,
-            }
-        )
-
-        if progress_callback:
-            progress_callback(idx, total)
-
-    solved_file = job_dir / "solved_extracted_data.json"
-    with solved_file.open("w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-
-    return results, solved_file
-
-
-def _parse_structured_solution(solution_text: str, answer_key: dict) -> list:
-    """Parse structured solution output into question items."""
-    results = []
+                    if job_id:
+                        job_manager.add_log(job_id, f"⚠️ Batch {batch_idx + 1} returned no results", "warning")
+            
+            except Exception as exc:
+                logger.error(f"Batch {batch_idx + 1} failed: {exc}")
+                if job_id:
+                    job_manager.add_log(job_id, f"❌ Batch {batch_idx + 1} failed: {str(exc)}", "error")
+                # Continue with other batches even if one fails
     
-    # Split by section separators
-    sections = re.split(r'={10,}', solution_text)
-    
-    current_section = None
-    question_number = None
-    
-    for section in sections:
-        section = section.strip()
-        if not section:
-            continue
+    else:
+        # Fallback: if no question blocks found, send entire text as one batch
+        if job_id:
+            job_manager.add_log(job_id, f"⚠️ No question blocks found, sending entire text as single batch", "warning")
         
-        # Check if this is a section header
-        section_match = re.match(r'SECTION:\s*(.+)', section, re.IGNORECASE)
-        if section_match:
-            current_section = section_match.group(1).strip()
-            continue
-        
-        # Parse questions in this section
-        questions = re.split(r'-{10,}', section)
-        
-        for question_block in questions:
-            question_block = question_block.strip()
-            if not question_block:
-                continue
-            
-            # Extract question number
-            qnum_match = re.search(r'Question\s+(\d+):', question_block, re.IGNORECASE)
-            if qnum_match:
-                question_number = qnum_match.group(1)
-            
-            # Extract question text
-            qtext_match = re.search(r'Question\s+\d+:\s*(.+?)(?:\n|Options:)', question_block, re.DOTALL | re.IGNORECASE)
-            question_text = qtext_match.group(1).strip() if qtext_match else ""
-            
-            # Extract options
-            options_match = re.search(r'Options:\s*(.+?)(?:\n|CORRECT)', question_block, re.DOTALL | re.IGNORECASE)
-            options_text = options_match.group(1).strip() if options_match else ""
-            options = []
-            if options_text:
-                # Parse options like "1) [ans] | 2) [ans]"
-                option_parts = re.split(r'\s*\|\s*', options_text)
-                for opt_part in option_parts:
-                    opt_match = re.match(r'(\d+)\)\s*(.+)', opt_part.strip())
-                    if opt_match:
-                        options.append({"label": opt_match.group(1), "text": opt_match.group(2).strip()})
-            
-            # Extract correct answer
-            answer_match = re.search(r'CORRECT ANSWER:\s*(\d+)\)\s*(.+)', question_block, re.IGNORECASE)
-            if answer_match:
-                answer_option = answer_match.group(1)
-                answer_text = answer_match.group(2).strip()
-            else:
-                answer_option = None
-                answer_text = ""
-            
-            # Extract solution/explanation
-            solution_match = re.search(r'SOLUTION:\s*(.+?)(?:\n-{10,}|$)', question_block, re.DOTALL | re.IGNORECASE)
-            explanation = solution_match.group(1).strip() if solution_match else ""
-            
-            # Use answer key if available
-            if question_number and answer_key:
-                try:
-                    qnum_int = int(question_number)
-                    opt_digit = answer_key.get(qnum_int)
-                    if opt_digit:
-                        answer_option = opt_digit
-                        selected_option = next((opt for opt in options if opt.get("label") == opt_digit), None)
-                        if selected_option:
-                            answer_text = f"{selected_option['label']}) {selected_option['text']}"
-                        else:
-                            answer_text = f"Option {opt_digit}"
-                except ValueError:
-                    pass
-            
-            if question_number and (question_text or answer_text):
-                results.append({
-                    "question_number": question_number,
-                    "question_text": question_text,
-                    "question_body": question_text,
-                    "options": options,
-                    "answer": answer_text,
-                    "answer_option": answer_option,
-                    "explanation": explanation,
-                    "method": "llm_structured",
-                    "section": current_section,
-                })
+        try:
+            all_results = _solve_questions_with_json_prompt(
+                questions_text,
+                expected_count,
+                expected_numbers,
+                answer_key or {},
+                progress_callback=progress_callback,
+                job_id=job_id,
+            ) or []
+        except Exception as exc:
+            logger.error(f"Single batch processing failed: {exc}")
+            if job_id:
+                job_manager.add_log(job_id, f"❌ Single batch failed: {str(exc)}", "error")
+            all_results = []
     
-    return results
+    if all_results:
+        if job_id:
+            job_manager.add_log(job_id, f"✅ All batches completed: {len(all_results)} total questions solved", "success")
+        solved_file = job_dir / "solved_extracted_data.json"
+        with solved_file.open("w", encoding="utf-8") as f:
+            json.dump(all_results, f, ensure_ascii=False, indent=2)
+        return all_results, solved_file
+    else:
+        raise RuntimeError("JSON solver returned no results from any batch")
 
 
 def _pipeline_translate_items(items, target_language: str, job_dir: Path, progress_callback=None):
@@ -718,7 +854,15 @@ Translate the following MCQ solutions to {target_language}.
             
             batch_content = "\n\n".join(batch_content_parts)
             
-            prompt = f"""
+            # Check if batch content exceeds limit - if so, split into smaller chunks
+            if len(batch_content) > char_limit:
+                # Batch too large - translate items individually to avoid truncation
+                logger.warning(f"Batch size ({len(batch_content)} chars) exceeds limit ({char_limit}). Translating items individually.")
+                batch_translated = _translate_items_individually(batch, target_language, lang_lower)
+                translated.extend(batch_translated)
+            else:
+                # Batch fits within limit - translate together
+                prompt = f"""
 Translate the following MCQ solutions to {target_language}.
 
 **CRITICAL INSTRUCTIONS:**
@@ -735,21 +879,35 @@ Translate the following MCQ solutions to {target_language}.
 
 6. Preserve line breaks and spacing
 
+7. Translate ALL questions in the batch - do not skip any
+
 **Content to translate:**
 
-{batch_content[:char_limit]}
+{batch_content}
 
 **Provide ONLY the translated content, maintaining exact structure.**
 """
-            try:
-                response = _call_generative_model(prompt)
-                translated_text = response.text.strip()
-                batch_translated = _parse_translated_content(translated_text, batch, lang_lower)
-                translated.extend(batch_translated)
-            except Exception as exc:
-                # Fallback to individual item translation for this batch
-                batch_translated = _translate_items_individually(batch, target_language, lang_lower)
-                translated.extend(batch_translated)
+                try:
+                    response = _call_generative_model(prompt)
+                    translated_text = response.text.strip()
+                    batch_translated = _parse_translated_content(translated_text, batch, lang_lower)
+                    
+                    # Safety check: Ensure all items from batch are included
+                    if len(batch_translated) < len(batch):
+                        logger.warning(f"Translation returned {len(batch_translated)} items but batch had {len(batch)} items. Filling missing items.")
+                        # Add missing items using individual translation
+                        missing_indices = [i for i in range(len(batch)) if i >= len(batch_translated)]
+                        for idx in missing_indices:
+                            individual_translated = _translate_items_individually([batch[idx]], target_language, lang_lower)
+                            if individual_translated:
+                                batch_translated.extend(individual_translated)
+                    
+                    translated.extend(batch_translated)
+                except Exception as exc:
+                    logger.error(f"Batch translation failed: {exc}. Falling back to individual translation.")
+                    # Fallback to individual item translation for this batch
+                    batch_translated = _translate_items_individually(batch, target_language, lang_lower)
+                    translated.extend(batch_translated)
             
             processed += len(batch)
             if progress_callback:
@@ -765,58 +923,97 @@ def _parse_translated_content(translated_text: str, original_items: list, lang_l
     """Parse translated formatted content back into item structure."""
     translated_items = []
     
-    # Split by separator
+    # Split by separator - but be more flexible with separators
     question_blocks = re.split(r'═{3,}', translated_text)
+    # Remove empty blocks
+    question_blocks = [b.strip() for b in question_blocks if b.strip()]
     
+    # If no blocks found, try splitting by double newlines or section markers
+    if not question_blocks or len(question_blocks) == 1:
+        # Try alternative splitting
+        question_blocks = re.split(r'\n\s*-{3,}\s*\n', translated_text)
+        question_blocks = [b.strip() for b in question_blocks if b.strip()]
+    
+    logger.debug(f"Parsing translation: {len(question_blocks)} blocks found, {len(original_items)} original items")
+    
+    # Process matched blocks
     for idx, (block, original_item) in enumerate(zip(question_blocks, original_items)):
         if not block.strip():
+            # Empty block - keep original item
             translated_items.append(original_item)
             continue
         
         block = block.strip()
         
-        # Extract question number and text
-        qnum_match = re.search(r'Q(\d+):\s*(.+?)(?:\n|Options:)', block, re.DOTALL | re.IGNORECASE)
+        # Extract question number and text - try multiple patterns
+        # The question text should be everything before "Options:" label
+        qnum_match = re.search(r'Q\s*(\d+):\s*(.+?)(?=Options:)', block, re.DOTALL | re.IGNORECASE)
         if qnum_match:
             question_text = qnum_match.group(2).strip()
         else:
-            q_match = re.search(r'Q:\s*(.+?)(?:\n|Options:)', block, re.DOTALL | re.IGNORECASE)
-            question_text = q_match.group(1).strip() if q_match else ""
+            q_match = re.search(r'Q:\s*(.+?)(?=Options:)', block, re.DOTALL | re.IGNORECASE)
+            if q_match:
+                question_text = q_match.group(1).strip()
+            else:
+                # Try Question X: pattern
+                q_match2 = re.search(r'Question\s*\d+:\s*(.+?)(?=Options:)', block, re.DOTALL | re.IGNORECASE)
+                if q_match2:
+                    question_text = q_match2.group(1).strip()
+                else:
+                    # If no Options: label found, take everything up to answer/solution
+                    q_match3 = re.search(r'Q\s*\d+:\s*(.+?)(?=✅|📝|$)', block, re.DOTALL | re.IGNORECASE)
+                    question_text = q_match3.group(1).strip() if q_match3 else ""
         
-        # Extract options
-        options_match = re.search(r'Options:\s*(.+?)(?:\n|✅)', block, re.DOTALL | re.IGNORECASE)
+        # Extract options - find all option lines between "Options:" and answer/solution
+        options_match = re.search(r'Options:\s*(.+?)(?=✅|📝|સમાધાનం:|வரణ:|Answer:|ANSWER:|$)', block, re.DOTALL | re.IGNORECASE)
         options = []
         if options_match:
             options_text = options_match.group(1).strip()
-            # Parse options like "1) text | 2) text"
-            opt_parts = re.split(r'\s*\|\s*', options_text)
+            # Parse options like "1) text | 2) text" or "1) text\n2) text"
+            opt_parts = re.split(r'\s*\|\s*|\n+\s*(?=\d+\))', options_text)
             for opt_part in opt_parts:
-                opt_match = re.match(r'(\d+)\)\s*(.+)', opt_part.strip())
+                opt_match = re.match(r'(\d+)\)\s*(.+)', opt_part.strip(), re.DOTALL)
                 if opt_match:
                     options.append({"label": opt_match.group(1), "text": opt_match.group(2).strip()})
         
-        # Extract answer
-        answer_match = re.search(r'✅\s*Answer:\s*(.+?)(?:\n|📝)', block, re.DOTALL | re.IGNORECASE)
+        # Extract answer - try multiple patterns
+        answer_match = re.search(r'✅\s*Answer:\s*(.+?)(?:\n|📝|$)', block, re.DOTALL | re.IGNORECASE)
+        if not answer_match:
+            answer_match = re.search(r'(?:CORRECT\s+)?ANSWER:\s*(.+?)(?:\n|📝|$)', block, re.DOTALL | re.IGNORECASE)
         answer = answer_match.group(1).strip() if answer_match else ""
         
-        # Extract solution/explanation
+        # Extract solution/explanation - try multiple patterns
         solution_match = re.search(r'📝\s*Solution:\s*(.+?)(?:\n|═|$)', block, re.DOTALL | re.IGNORECASE)
+        if not solution_match:
+            solution_match = re.search(r'SOLUTION:\s*(.+?)(?:\n|═|$)', block, re.DOTALL | re.IGNORECASE)
         explanation = solution_match.group(1).strip() if solution_match else ""
         
         # Build translated item
         translated_item = {**original_item}
-        translated_item[f"question_text_{lang_lower}"] = question_text
-        translated_item[f"question_body_{lang_lower}"] = question_text
+        if question_text:
+            translated_item[f"question_text_{lang_lower}"] = question_text
+            translated_item[f"question_body_{lang_lower}"] = question_text
         if options:
             translated_item[f"options_{lang_lower}"] = options
-        translated_item[f"answer_{lang_lower}"] = answer
-        translated_item[f"explanation_{lang_lower}"] = explanation
+        if answer:
+            translated_item[f"answer_{lang_lower}"] = answer
+        if explanation:
+            translated_item[f"explanation_{lang_lower}"] = explanation
         
         translated_items.append(translated_item)
     
+    # Handle case where we have fewer translated blocks than original items
+    # This can happen if translation was truncated or incomplete
+    if len(translated_items) < len(original_items):
+        logger.warning(f"Translation incomplete: {len(translated_items)} items translated, {len(original_items)} expected. Adding untranslated items.")
+        for idx in range(len(translated_items), len(original_items)):
+            # Keep original item without translation
+            translated_items.append(original_items[idx])
+    
     # Handle case where we have more blocks than items (shouldn't happen, but safety)
-    while len(translated_items) < len(original_items):
-        translated_items.append(original_items[len(translated_items)])
+    if len(translated_items) > len(original_items):
+        logger.warning(f"More translated blocks ({len(translated_items)}) than original items ({len(original_items)}). Truncating.")
+        translated_items = translated_items[:len(original_items)]
     
     return translated_items
 
@@ -942,32 +1139,17 @@ def _build_solution_docx_text(translated_items, lang_lower: str):
                 opt_text = _clean_text(opt.get("text", "")).strip()
                 if opt_text:
                     if answer_option and str(opt_label) == str(answer_option):
-                        lines.append(f"  ✓ {opt_label}) {opt_text}")
+                        lines.append(f"✓ {opt_label}) {opt_text}")
                     else:
-                        lines.append(f"    {opt_label}) {opt_text}")
+                        lines.append(f"{opt_label}) {opt_text}")
             lines.append("")
         
-        # Show actual answer text instead of "Option X"
-        if actual_answer_text:
+        # Show just the answer option number (not the full text)
+        if answer_option:
+            lines.append(f"{ans_label}: {answer_option}")
+        elif actual_answer_text:
             lines.append(f"{ans_label}: {actual_answer_text}")
         elif ans:
-            # If we have answer but no actual text, try to clean it
-            cleaned_ans = ans.replace("Option ", "").replace("option ", "").strip()
-            if cleaned_ans and cleaned_ans != ans:
-                # Try to find the option text
-                if options and isinstance(options, list) and len(options) > 0:
-                    for opt in options:
-                        opt_label = str(opt.get("label", "")).strip()
-                        if str(opt_label) == str(cleaned_ans):
-                            actual_answer_text = _clean_text(opt.get("text", "")).strip()
-                            if actual_answer_text:
-                                lines.append(f"{ans_label}: {actual_answer_text}")
-                                break
-                    if not actual_answer_text:
-                        lines.append(f"{ans_label}: {ans}")
-                else:
-                    lines.append(f"{ans_label}: {ans}")
-            else:
                 lines.append(f"{ans_label}: {ans}")
         lines.append("")
         
@@ -979,8 +1161,18 @@ def _build_solution_docx_text(translated_items, lang_lower: str):
     return "\n".join(lines).strip()
 
 
-def run_solution_generation_pipeline(uploaded_file, target_language: str, progress_bar, status_placeholder):
-    """Main pipeline for solution generation."""
+def run_solution_generation_pipeline(uploaded_file, target_language: str, status_callback=None, job_id: str = None):
+    """Main pipeline for solution generation.
+    
+    Args:
+        uploaded_file: File object or bytes containing PDF data
+        target_language: Target language label (e.g., "Telugu", "Hindi")
+        status_callback: Optional callback function(status_callback(progress: int, message: str, status: str))
+            - progress: 0-100
+            - message: Status message
+            - status: "processing" | "completed" | "failed"
+        job_id: Optional job ID for storing debug data
+    """
     lang_lower = target_language.lower()
     job_dir = SOLUTION_JOBS_ROOT / str(uuid.uuid4())
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -988,22 +1180,24 @@ def run_solution_generation_pipeline(uploaded_file, target_language: str, progre
     _write_uploaded_file(uploaded_file, input_pdf)
 
     def _update(label, fraction):
-        fraction = min(max(fraction, 0.0), 1.0)
-        progress_bar.progress(fraction, text=label)
-        status_placeholder.info(label)
+        if status_callback:
+            progress = int(min(max(fraction * 100, 0), 100))
+            status_callback(progress, label, "processing")
 
     _update("Extracting PDF...", 0.05)
     pages, extracted_json = _pipeline_extract_pdf(input_pdf, job_dir)
 
     def solving_progress(current, total):
-        _update("Solving questions...", 0.1 + (current / (total or 1)) * 0.35)
+        progress = 0.1 + (current / (total or 1)) * 0.35
+        _update("Solving questions...", progress)
 
-    solved, solved_json = _pipeline_solve_pages(pages, job_dir, solving_progress)
+    solved, solved_json = _pipeline_solve_pages(pages, job_dir, solving_progress, job_id=job_id)
 
     def translate_progress(current, total):
+        progress = 0.5 + (current / (total or 1)) * 0.3
         _update(
             f"Translating to {target_language}...",
-            0.5 + (current / (total or 1)) * 0.3,
+            progress,
         )
 
     translated, translated_json = _pipeline_translate_items(
@@ -1021,6 +1215,9 @@ def run_solution_generation_pipeline(uploaded_file, target_language: str, progre
     else:
         final_docx_path = None
     _update("Pipeline complete!", 1.0)
+    
+    if status_callback:
+        status_callback(100, "Pipeline complete!", "completed")
 
     return {
         "job_dir": str(job_dir),

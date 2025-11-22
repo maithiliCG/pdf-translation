@@ -1,5 +1,7 @@
-# Core Streamlit Application
-streamlit>=1.28.0
+# Core Flask Application
+Flask>=3.0.0
+Flask-RESTful>=0.3.10
+Flask-CORS>=4.0.0
 python-dotenv>=1.0.0
 
 # PDF Processing

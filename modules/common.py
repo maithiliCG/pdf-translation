@@ -4,16 +4,18 @@ Common utilities and shared functions for PDFMathTranslate
 import html
 import io
 import json
+import logging
 import re
 import time
 from pathlib import Path
 
-import streamlit as st
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import RGBColor
 
 from config.settings import model
+
+logger = logging.getLogger(__name__)
 
 
 def _call_generative_model(prompt: str, max_attempts: int = 3, cooldown_seconds: float = 45.0):
@@ -152,6 +154,6 @@ def create_docx(content, title="Document"):
         buffer.seek(0)
         return buffer.getvalue()
     except Exception as exc:
-        st.error(f"DOCX creation failed: {exc}")
-        return None
+        logger.error(f"DOCX creation failed: {exc}")
+        raise RuntimeError(f"Failed to create DOCX document: {exc}")
 

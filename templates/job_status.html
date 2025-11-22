@@ -24,6 +24,21 @@
             <div style="color: #9cdcfe;">Waiting for process to start...</div>
         </div>
     </div>
+    <div id="debug-data-container" style="display: none; margin-top: 20px;">
+        <h3>Debug Information</h3>
+        <div style="background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 600px; overflow-y: auto;">
+            <div id="debug-tabs" style="display: flex; gap: 10px; margin-bottom: 15px; border-bottom: 1px solid #444;">
+                <button class="debug-tab" onclick="showDebugTab('extracted')" style="background: #2d2d2d; border: none; color: #d4d4d4; padding: 8px 15px; cursor: pointer; border-radius: 3px 3px 0 0;">📄 Extracted Text</button>
+                <button class="debug-tab" onclick="showDebugTab('questions')" style="background: #2d2d2d; border: none; color: #d4d4d4; padding: 8px 15px; cursor: pointer; border-radius: 3px 3px 0 0;">📋 Questions Text</button>
+                <button class="debug-tab" onclick="showDebugTab('formatted')" style="background: #2d2d2d; border: none; color: #d4d4d4; padding: 8px 15px; cursor: pointer; border-radius: 3px 3px 0 0;">📤 Sent to Gemini</button>
+                <button class="debug-tab" onclick="showDebugTab('response')" style="background: #2d2d2d; border: none; color: #d4d4d4; padding: 8px 15px; cursor: pointer; border-radius: 3px 3px 0 0;">🤖 Gemini Response</button>
+            </div>
+            <div id="debug-extracted" class="debug-content" style="display: none; white-space: pre-wrap; word-wrap: break-word; background: #252526; padding: 10px; border-radius: 3px; max-height: 500px; overflow-y: auto;"></div>
+            <div id="debug-questions" class="debug-content" style="display: none; white-space: pre-wrap; word-wrap: break-word; background: #252526; padding: 10px; border-radius: 3px; max-height: 500px; overflow-y: auto;"></div>
+            <div id="debug-formatted" class="debug-content" style="display: none; white-space: pre-wrap; word-wrap: break-word; background: #252526; padding: 10px; border-radius: 3px; max-height: 500px; overflow-y: auto;"></div>
+            <div id="debug-response" class="debug-content" style="display: none; white-space: pre-wrap; word-wrap: break-word; background: #252526; padding: 10px; border-radius: 3px; max-height: 500px; overflow-y: auto;"></div>
+        </div>
+    </div>
     <div id="result-container" style="display: none;">
         <h3>Result</h3>
         <div id="result-content"></div>
@@ -130,6 +145,92 @@ function updateStatus(data) {
         clearInterval(pollInterval);
         showError(data.error);
     }
+    
+    // Update debug data if available
+    if (data.debug_data) {
+        updateDebugData(data.debug_data);
+    }
+}
+
+function updateDebugData(debugData) {
+    const debugContainer = document.getElementById('debug-data-container');
+    if (!debugContainer) return;
+    
+    debugContainer.style.display = 'block';
+    
+    // Show extracted PDF text
+    if (debugData.extracted_pdf_text) {
+        const extractedDiv = document.getElementById('debug-extracted');
+        if (extractedDiv) {
+            extractedDiv.textContent = debugData.extracted_pdf_text;
+        }
+    }
+    
+    // Show questions text (after removing answer key)
+    if (debugData.questions_text_after_key_removal) {
+        const questionsDiv = document.getElementById('debug-questions');
+        if (questionsDiv) {
+            questionsDiv.textContent = debugData.questions_text_after_key_removal;
+        }
+    }
+    
+    // Show formatted text sent to Gemini
+    if (debugData.formatted_text_sent_to_gemini) {
+        const formattedDiv = document.getElementById('debug-formatted');
+        if (formattedDiv) {
+            formattedDiv.textContent = debugData.formatted_text_sent_to_gemini;
+        }
+    }
+    
+    // Show Gemini response (use the latest attempt or the successful one)
+    let geminiResponse = null;
+    if (debugData.gemini_response_attempt_1) {
+        geminiResponse = debugData.gemini_response_attempt_1;
+    }
+    if (debugData.gemini_response_attempt_2) {
+        geminiResponse = debugData.gemini_response_attempt_2;
+    }
+    if (debugData.gemini_response_attempt_3) {
+        geminiResponse = debugData.gemini_response_attempt_3;
+    }
+    
+    if (geminiResponse) {
+        const responseDiv = document.getElementById('debug-response');
+        if (responseDiv) {
+            responseDiv.textContent = geminiResponse;
+        }
+    }
+}
+
+function showDebugTab(tabName) {
+    // Hide all debug content
+    document.querySelectorAll('.debug-content').forEach(div => {
+        div.style.display = 'none';
+    });
+    
+    // Remove active class from all tabs
+    document.querySelectorAll('.debug-tab').forEach(btn => {
+        btn.style.background = '#2d2d2d';
+        btn.style.borderBottom = 'none';
+    });
+    
+    // Show selected tab content
+    const selectedDiv = document.getElementById(`debug-${tabName}`);
+    if (selectedDiv) {
+        selectedDiv.style.display = 'block';
+    }
+    
+    // Highlight active tab
+    const tabs = document.querySelectorAll('.debug-tab');
+    tabs.forEach(btn => {
+        if (btn.textContent.includes(tabName === 'extracted' ? 'Extracted' : 
+                                     tabName === 'questions' ? 'Questions' :
+                                     tabName === 'formatted' ? 'Sent' :
+                                     tabName === 'response' ? 'Response' : '')) {
+            btn.style.background = '#007acc';
+            btn.style.borderBottom = '2px solid #007acc';
+        }
+    });
 }
 
 function showResult(result, jobType) {

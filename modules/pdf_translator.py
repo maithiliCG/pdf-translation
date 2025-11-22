@@ -3,15 +3,17 @@ PDF Translator Module - Full PDF translation with layout preservation
 """
 import asyncio
 import io
+import logging
 import os
 import uuid
 from pathlib import Path
 
 import fitz  # PyMuPDF
-import streamlit as st
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
+
+logger = logging.getLogger(__name__)
 
 from pdf2zh_next.config.model import SettingsModel
 from pdf2zh_next.config.translate_engine_model import GeminiSettings
@@ -49,10 +51,12 @@ def _build_pdf2zh_settings(lang_label: str, output_dir: Path):
     settings.translation.lang_out = lang_label
     settings.translation.output = str(output_dir)
     settings.basic.input_files = set()
+    # Disable watermark to remove BabelDOC attribution text
+    settings.pdf.watermark_output_mode = "no_watermark"
     try:
         settings.validate_settings()
     except Exception as exc:
-        st.warning(f"Settings warning: {exc}")
+        logger.warning(f"Settings warning: {exc}")
     return settings
 
 
@@ -148,10 +152,18 @@ async def _stream_pdf2zh(settings: SettingsModel, pdf_path: Path, progress_callb
     return translate_result
 
 
-def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None, status_placeholder=None):
+def translate_pdf_with_pdf2zh(uploaded_file, target_language, status_callback=None):
     """Translate PDF using pdf2zh_next library with Gemini API.
     
     Uses Gemini API as the primary and only translator.
+    
+    Args:
+        uploaded_file: File object or bytes containing PDF data
+        target_language: Target language label (e.g., "Hindi", "Telugu")
+        status_callback: Optional callback function(status_callback(progress: int, message: str, status: str))
+            - progress: 0-100
+            - message: Status message
+            - status: "processing" | "completed" | "failed"
     """
     lang_code = LANGUAGES.get(target_language, target_language)
     lang_label = target_language
@@ -160,20 +172,25 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
     _write_uploaded_file(uploaded_file, input_pdf)
 
     def _progress(event, translator_name="Gemini"):
-        if not progress_bar:
-            return
-        overall = min(max(event.get("overall_progress", 0) / 100, 0.0), 1.0)
-        stage = event.get("stage", "Processing")
-        # Add translator name to progress text
-        progress_text = f"[{translator_name}] {stage}"
-        progress_bar.progress(overall, text=progress_text)
-        if status_placeholder:
-            status_placeholder.info(f"Using {translator_name}: {stage}")
+        if status_callback:
+            overall_progress = min(max(event.get("overall_progress", 0), 0), 100)
+            stage = event.get("stage", "Processing")
+            message = f"[{translator_name}] {stage}"
+            # Enhanced message with more detail
+            if "extract" in stage.lower() or "parse" in stage.lower():
+                message = f"📖 PDF Text Extraction: {stage}"
+            elif "translat" in stage.lower():
+                message = f"🔄 Translation: {stage}"
+            elif "render" in stage.lower() or "pdf" in stage.lower() or "save" in stage.lower() or "font" in stage.lower():
+                message = f"🎨 PDF Rendering: {stage}"
+            else:
+                message = f"⚙️ {stage}"
+            status_callback(overall_progress, message, "processing")
 
     # Use Gemini API for translation
     try:
-        if status_placeholder:
-            status_placeholder.info("🔄 Starting translation with Gemini API...")
+        if status_callback:
+            status_callback(0, "🚀 Starting PDF translation process...", "processing")
         
         if not GEMINI_API_KEY:
             raise ValueError("Gemini API key not found. Please set GENAI_API_KEY in your environment.")
@@ -186,15 +203,13 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
         if result is None:
             raise RuntimeError("Translation completed but returned no result.")
         
-        if progress_bar:
-            progress_bar.progress(1.0, text="Translation complete!")
-        if status_placeholder:
-            status_placeholder.success("✅ Translation complete using Gemini API!")
+        if status_callback:
+            status_callback(100, "Translation complete!", "completed")
 
         return {
             "job_dir": str(job_dir),
-            "mono_pdf_path": getattr(result, "mono_pdf_path", None) if result else None,
-            "dual_pdf_path": getattr(result, "dual_pdf_path", None) if result else None,
+            "mono_pdf_path": str(getattr(result, "mono_pdf_path", None)) if result and getattr(result, "mono_pdf_path", None) else None,
+            "dual_pdf_path": str(getattr(result, "dual_pdf_path", None)) if result and getattr(result, "dual_pdf_path", None) else None,
             "lang_code": lang_code,
             "lang_label": lang_label,
         }
@@ -205,16 +220,18 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
         # Check for babeldoc-related errors
         if "babeldoc is not available" in error_msg or "babeldoc" in error_msg.lower():
             raise RuntimeError(
-                "⚠️ **PDF Translator Feature Unavailable**\n\n"
-                "The PDF Translator requires the `babeldoc` library, which is not currently available.\n\n"
-                "**Why?**\n"
-                "You're using Python 3.14, but `babeldoc` only supports Python <3.14.\n\n"
-                "**Solutions:**\n"
-                "1. **Use Python 3.13 or 3.12** (recommended)\n"
-                "   - Create a new virtual environment with Python 3.13/3.12\n"
-                "   - Reinstall dependencies\n"
-                "2. **Wait for babeldoc update** - Check for Python 3.14 support\n\n"
-                "**Note:** The Solution Generator and MCQ Generator features work fine with Python 3.14!"
+                "PDF Translator Feature Unavailable\n\n"
+                "The PDF Translator requires the 'babeldoc' library, which cannot be installed due to dependency conflicts.\n\n"
+                "Why?\n"
+                "babeldoc requires rapidocr-onnxruntime>=1.4.4, but only version 1.2.3 is available on PyPI.\n\n"
+                "Current Status:\n"
+                "- PDF Translator: NOT WORKING (requires babeldoc)\n"
+                "- Solution Generator: WORKING (doesn't need babeldoc)\n"
+                "- MCQ Generator: WORKING (doesn't need babeldoc)\n\n"
+                "Solutions:\n"
+                "1. Wait for rapidocr-onnxruntime>=1.4.4 to be released\n"
+                "2. Use Solution Generator or MCQ Generator features which work fine\n"
+                "3. Contact babeldoc maintainers about the dependency issue"
             )
         
         # Handle other errors
@@ -259,8 +276,8 @@ def create_docx_from_pdf(pdf_path: str, title: str):
         buffer.seek(0)
         return buffer.getvalue()
     except Exception as exc:
-        st.error(f"DOCX creation from PDF failed: {exc}")
-        return None
+        logger.error(f"DOCX creation from PDF failed: {exc}")
+        raise RuntimeError(f"Failed to create DOCX from PDF: {exc}") from exc
 
 
 def create_docx_from_pdf_text(pdf_path: str, title: str):
@@ -301,5 +318,5 @@ def create_docx_from_pdf_text(pdf_path: str, title: str):
         buffer.seek(0)
         return buffer.getvalue()
     except Exception as exc:
-        st.error(f"DOCX creation from PDF text failed: {exc}")
-        return None
+        logger.error(f"DOCX creation from PDF text failed: {exc}")
+        raise RuntimeError(f"Failed to create DOCX from PDF text: {exc}") from exc

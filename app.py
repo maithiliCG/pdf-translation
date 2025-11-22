@@ -1,362 +1,238 @@
 """
-PDFMathTranslate - Main Streamlit Application
-AI Study Assistant for solving PDFs, generating MCQs, and translating PDFs
+Flask Application - AI Study Assistant
+PDF Translator, Solution Generator, and MCQ Generator
 """
-import os
-from datetime import datetime
-import streamlit as st
+import logging
+from pathlib import Path
+from flask import Flask, render_template, jsonify, send_file, request
+from flask_cors import CORS
 
 from config.settings import LANGUAGES, GEMINI_API_KEY
-from modules.solution_generator import run_solution_generation_pipeline
-from modules.mcq_generator import (
-    generate_mcqs,
-    parse_mcqs,
-    _translate_mcq_items,
-    _iter_options,
+import os
+from services.job_manager import job_manager
+from api.pdf_translator import bp as pdf_translator_bp
+from api.solution_generator import bp as solution_generator_bp
+from api.mcq_generator import bp as mcq_generator_bp
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-from modules.pdf_translator import translate_pdf_with_pdf2zh, create_docx_from_pdf
-from modules.common import create_docx
-from modules.database_service import db_service
+logger = logging.getLogger(__name__)
 
-# Check API key
-if not GEMINI_API_KEY:
-    st.error(
-        "⚠️ **API Key Missing**\n\n"
-        "Please add `GENAI_API_KEY` (or `GEMINI_API_KEY`) to your environment.\n\n"
-        "**For local development:**\n"
-        "1. Create a `.env` file in the project root\n"
-        "2. Add: `GENAI_API_KEY=your_api_key_here`\n\n"
-        "**For Streamlit Cloud:**\n"
-        "1. Go to app settings\n"
-        "2. Add secret: `GENAI_API_KEY`\n\n"
-        "Get your API key from: https://makersuite.google.com/app/apikey"
-    )
-    st.stop()
+# Initialize Flask app
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
-# Session state defaults
-SESSION_DEFAULTS = {
-    "solution_result": None,
-    "mcqs_data": None,
-    "mcqs_topic": None,
-    "translated_mcqs": None,
-    "mcqs_translated_lang": None,
-    "pdf_translation_result": None,
-    "translated_pdf_lang": None,
-}
+# Enable CORS for React frontend integration
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-for key, value in SESSION_DEFAULTS.items():
-    st.session_state.setdefault(key, value)
+# Register blueprints
+app.register_blueprint(pdf_translator_bp)
+app.register_blueprint(solution_generator_bp)
+app.register_blueprint(mcq_generator_bp)
 
-# Streamlit UI
-st.set_page_config(page_title="AI Study Assistant", page_icon="📚", layout="wide")
 
-st.title("📚 AI Study Assistant - PDFMathTranslate")
-st.markdown(
-    "Solve PDFs, generate MCQs, and translate full PDFs with layout preservation."
-)
+@app.route('/')
+def index():
+    """Main page with UI."""
+    return render_template('index.html')
 
-tab1, tab2, tab3 = st.tabs(
-    ["🌍 PDF Translator", "📄 Solution Generator", "❓ MCQ Generator"]
-)
 
-# Tab 1: PDF Translator
-with tab1:
-    st.header("PDF Translator")
-    translator_file = st.file_uploader("Upload PDF to translate", type="pdf", key="translator_pdf")
-    translate_language = st.selectbox(
-        "Target language",
-        options=list(LANGUAGES.keys()),
-        index=list(LANGUAGES.keys()).index("Hindi"),
-    )
+@app.route('/jobs/<job_id>/status')
+def job_status_page(job_id):
+    """Job status page."""
+    return render_template('job_status.html', job_id=job_id)
 
-    if translator_file and st.button("🔄 Translate PDF"):
-        progress = st.progress(0)
-        status = st.empty()
-        try:
-            result = translate_pdf_with_pdf2zh(translator_file, translate_language, progress, status)
-            st.session_state["pdf_translation_result"] = result
-            st.session_state["translated_pdf_lang"] = translate_language
-            
-            # Store in MongoDB
-            if db_service.is_connected():
-                try:
-                    # Read file data
-                    translator_file.seek(0)
-                    input_data = translator_file.read()
-                    
-                    # Read output files
-                    mono_data = None
-                    dual_data = None
-                    mono_path = result.get("mono_pdf_path")
-                    dual_path = result.get("dual_pdf_path")
-                    
-                    if mono_path and os.path.exists(mono_path):
-                        with open(mono_path, "rb") as f:
-                            mono_data = f.read()
-                    
-                    if dual_path and os.path.exists(dual_path):
-                        with open(dual_path, "rb") as f:
-                            dual_data = f.read()
-                    
-                    # Store in database
-                    job_id = db_service.store_translation(
-                        input_file_data=input_data,
-                        input_filename=translator_file.name,
-                        language=translate_language,
-                        mono_pdf_data=mono_data,
-                        dual_pdf_data=dual_data,
-                        metadata={"lang_code": result.get("lang_code")}
-                    )
-                    
-                    if job_id:
-                        st.session_state["translation_job_id"] = job_id
-                        st.info(f"💾 Stored in database. Job ID: {job_id}")
-                except Exception as db_exc:
-                    st.warning(f"⚠️ Could not store in database: {db_exc}")
-            
-            st.success("PDF translated successfully!")
-        except Exception as exc:
-            progress.empty()
-            status.empty()
-            st.error(f"PDF translation failed: {exc}")
 
-    translation = st.session_state.get("pdf_translation_result")
-    if translation:
-        st.markdown("---")
-        st.subheader(f"Downloads ({st.session_state.get('translated_pdf_lang')})")
-        mono = translation.get("mono_pdf_path")
-        dual = translation.get("dual_pdf_path")
-        lang_code = translation.get("lang_code") or translation.get("lang_label") or "lang"
-        col1, col2 = st.columns(2)
-        if mono and os.path.exists(mono):
-            with col1:
-                st.download_button(
-                    "📥 Monolingual PDF",
-                    data=open(mono, "rb").read(),
-                    file_name=f"translated_{lang_code}_mono.pdf",
-                    mime="application/pdf",
-                )
-        if dual and os.path.exists(dual):
-            with col2:
-                st.download_button(
-                    "📥 Bilingual PDF",
-                    data=open(dual, "rb").read(),
-                    file_name=f"translated_{lang_code}_dual.pdf",
-                    mime="application/pdf",
-                )
+# API Routes
 
-# Tab 2: Solution Generator
-with tab2:
-    st.header("Solution Generator")
-    st.info("Generates extracted/solved/translated JSON plus a formatted DOCX.")
+def serialize_for_json(obj):
+    """Convert non-serializable objects to JSON-serializable format."""
+    from pathlib import Path
+    if isinstance(obj, Path):
+        return str(obj)
+    elif isinstance(obj, dict):
+        return {key: serialize_for_json(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [serialize_for_json(item) for item in obj]
+    elif hasattr(obj, 'isoformat'):  # datetime objects
+        return obj.isoformat()
+    else:
+        return obj
 
-    solution_file = st.file_uploader("Upload question paper PDF", type="pdf", key="solution_pdf")
-    solution_language = st.selectbox(
-        "Target language", 
-        options=list(LANGUAGES.keys()), 
-        index=list(LANGUAGES.keys()).index("Telugu")
-    )
+
+@app.route('/api/jobs/<job_id>/status', methods=['GET'])
+def get_job_status(job_id):
+    """Get job status."""
+    job = job_manager.get_job(job_id)
     
-    if solution_file and st.button("🚀 Run Solution Pipeline"):
-        progress = st.progress(0)
-        status = st.empty()
-        try:
-            result = run_solution_generation_pipeline(solution_file, solution_language, progress, status)
-            st.session_state["solution_result"] = result
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    
+    # Serialize job data to handle Path objects and datetime
+    serialized_job = serialize_for_json({
+        "job_id": job["job_id"],
+        "type": job["type"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "message": job["message"],
+        "result": job["result"],
+        "error": job["error"],
+        "created_at": job["created_at"],
+        "updated_at": job["updated_at"],
+        "logs": job.get("logs", []),  # Include process logs
+        "debug_data": job.get("debug_data", {})  # Include debug data (extracted text, prompts, responses)
+    })
+    
+    return jsonify(serialized_job)
+
+
+@app.route('/api/jobs/<job_id>/download', methods=['GET'])
+def download_job_result(job_id):
+    """Download job result files."""
+    job = job_manager.get_job(job_id)
+    
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    
+    if job["status"] != "completed":
+        return jsonify({"error": "Job not completed yet"}), 400
+    
+    result = job.get("result")
+    if not result:
+        return jsonify({"error": "No result available"}), 404
+    
+    job_type = job["type"]
+    download_type = request.args.get('type', 'default')
+    
+    try:
+        if job_type == "pdf_translation":
+            # PDF translation results - only monolingual PDF
+            # Default to monolingual PDF (ignore dual/bilingual)
+            file_path = result.get("mono_pdf_path") or result.get("dual_pdf_path")
+            filename = f"translated_{result.get('lang_code', 'lang')}_mono.pdf"
             
-            # Store in MongoDB
-            if db_service.is_connected():
-                try:
-                    # Read file data
-                    solution_file.seek(0)
-                    input_data = solution_file.read()
-                    
-                    # Read DOCX file
-                    docx_data = None
-                    docx_path = result.get("final_docx")
-                    if docx_path and os.path.exists(docx_path):
-                        with open(docx_path, "rb") as f:
-                            docx_data = f.read()
-                    
-                    # Store in database
-                    job_id = db_service.store_solution(
-                        input_file_data=input_data,
-                        input_filename=solution_file.name,
-                        language=solution_language,
-                        docx_data=docx_data,
-                        json_data=result.get("json_data"),
-                        metadata={"status": "completed"}
-                    )
-                    
-                    if job_id:
-                        st.session_state["solution_job_id"] = job_id
-                        st.info(f"💾 Stored in database. Job ID: {job_id}")
-                except Exception as db_exc:
-                    st.warning(f"⚠️ Could not store in database: {db_exc}")
+            if file_path and os.path.exists(file_path):
+                return send_file(
+                    file_path,
+                    mimetype='application/pdf',
+                    as_attachment=True,
+                    download_name=filename
+                )
+            else:
+                return jsonify({"error": "File not found"}), 404
+        
+        elif job_type == "solution_generation":
+            # Solution generation result
+            file_path = result.get("final_docx")
+            language = result.get("language", "unknown")
+            filename = f"solutions_{language}.docx"
             
-            st.success("Pipeline completed successfully!")
-        except Exception as exc:
-            progress.empty()
-            status.empty()
-            st.error(f"Solution pipeline failed: {exc}")
-
-    result = st.session_state.get("solution_result")
-    if result:
-        final_docx_path = result.get("final_docx")
-        if final_docx_path and os.path.exists(final_docx_path):
-            st.markdown("---")
-            st.download_button(
-                "📥 Download Final DOCX",
-                data=open(final_docx_path, "rb").read(),
-                file_name=f"solutions_{result['language']}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-
-# Tab 3: MCQ Generator
-with tab3:
-    st.header("MCQ Generator")
-    topic = st.text_input("Topic", placeholder="e.g., Photosynthesis, Algebra, WW-II")
-    num_questions = st.number_input("How many questions?", min_value=1, max_value=10, value=5)
-    mcq_translate_lang = st.selectbox(
-        "Generate MCQs in",
-        options=list(LANGUAGES.keys()),
-        index=list(LANGUAGES.keys()).index("English"),
-        key="mcq_translate_lang",
-    )
-
-    if st.button("🎯 Generate MCQs"):
-        if not topic.strip():
-            st.warning("Please type a topic first.")
+            if file_path and os.path.exists(file_path):
+                return send_file(
+                    file_path,
+                    mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    as_attachment=True,
+                    download_name=filename
+                )
+            else:
+                return jsonify({"error": "File not found"}), 404
+        
+        elif job_type == "mcq_generation":
+            # MCQ generation result
+            file_path = result.get("docx_path")
+            topic = result.get("topic", "MCQs")
+            language = result.get("language", "English")
+            filename = f"mcqs_{topic.replace(' ', '_')}_{language}.docx"
+            
+            if file_path and os.path.exists(file_path):
+                return send_file(
+                    file_path,
+                    mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    as_attachment=True,
+                    download_name=filename
+                )
         else:
-            with st.spinner(f"Generating MCQs in {mcq_translate_lang}..."):
-                # Generate MCQs directly in the selected language
-                raw = generate_mcqs(topic, num_questions, mcq_translate_lang)
-            mcqs = parse_mcqs(raw) if raw else None
-            if mcqs:
-                # If language is not English, translate the generated MCQs
-                if mcq_translate_lang != "English":
-                    with st.spinner(f"Translating MCQs to {mcq_translate_lang}..."):
-                        translated_items = _translate_mcq_items(mcqs, mcq_translate_lang)
-                    st.session_state["translated_mcqs"] = translated_items
-                    st.session_state["mcqs_translated_lang"] = mcq_translate_lang
-                else:
-                    st.session_state["translated_mcqs"] = None
-                    st.session_state["mcqs_translated_lang"] = "English"
-                st.session_state["mcqs_data"] = mcqs
-                st.session_state["mcqs_topic"] = topic
-            else:
-                st.error("Failed to parse MCQ output. Please retry.")
-
-    mcqs = st.session_state.get("mcqs_data") or []
-
-    if mcqs:
-        topic_name = st.session_state.get("mcqs_topic", "Topic")
-        current_lang = st.session_state.get("mcqs_translated_lang", mcq_translate_lang)
-        st.success(f"Generated {len(mcqs)} MCQs on '{topic_name}' in {current_lang}")
+                return jsonify({"error": "File not found"}), 404
         
-        # Get translated items if available
-        translated_items = None
-        if (
-            st.session_state.get("translated_mcqs")
-            and st.session_state.get("mcqs_translated_lang") == mcq_translate_lang
-        ):
-            translated_items = st.session_state.get("translated_mcqs")
+        return jsonify({"error": "Unknown job type"}), 400
+    
+    except Exception as e:
+        logger.error(f"Error downloading file for job {job_id}: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
-        # Prepare DOCX content - only include translated content if available
-        docx_content = [f"MCQs on: {topic_name} ({current_lang})", ""]
-        
-        # Display and prepare content
-        for idx, mcq in enumerate(mcqs, start=1):
-            # Use translated content if available, otherwise use original
-            if translated_items and idx - 1 < len(translated_items):
-                translated_block = translated_items[idx - 1]
-                # Display translated version
-                st.markdown(
-                    f"<div style='background:#eef7ff;padding:0.75rem;border-left:4px solid #2196F3;border-radius:8px;margin-bottom:1rem;'>"
-                    f"<b>Q{idx}.</b> {translated_block.get('question','')}</div>",
-                    unsafe_allow_html=True,
-                )
-                for opt in translated_block.get("options", []):
-                    st.write(f"- {opt['label']}. {opt['text']}")
-                with st.expander("Answer & Explanation"):
-                    st.write(f"**Answer:** {translated_block.get('answer','')}")
-                    st.write(f"**Explanation:** {translated_block.get('explanation','')}")
-                
-                # Add only translated content to DOCX
-                docx_content.extend(
-                    [
-                        f"Question {idx}: {translated_block.get('question','')}",
-                    ]
-                )
-                for opt in translated_block.get("options", []):
-                    docx_content.append(f"{opt['label']}. {opt['text']}")
-                docx_content.extend(
-                    [
-                        f"Correct Answer: {translated_block.get('answer','')}",
-                        f"Explanation: {translated_block.get('explanation','')}",
-                        "═══",
-                    ]
-                )
-            else:
-                # Display original English version
-                st.markdown(
-                    f"<div style='background:#f7f9fc;padding:1rem;border-left:4px solid #4CAF50;border-radius:8px;margin-bottom:1rem;'><b>Q{idx}.</b> {mcq.get('question','')}</div>",
-                    unsafe_allow_html=True,
-                )
-                options = _iter_options(mcq.get("options"))
-                for letter, text in options:
-                    st.write(f"- {letter}. {text}")
-                with st.expander("Answer & Explanation"):
-                    st.write(f"**Answer:** {mcq.get('correct_answer','')}")
-                    st.write(f"**Explanation:** {mcq.get('explanation','')}")
-                
-                # Add original content to DOCX
-                docx_content.extend(
-                    [
-                        f"Question {idx}: {mcq.get('question','')}",
-                    ]
-                )
-                options = _iter_options(mcq.get("options"))
-                for letter, text in options:
-                    docx_content.append(f"{letter}. {text}")
-                docx_content.extend(
-                    [
-                        f"Correct Answer: {mcq.get('correct_answer','')}",
-                        f"Explanation: {mcq.get('explanation','')}",
-                        "═══",
-                    ]
-                )
 
-        docx_bytes = create_docx("\n".join(docx_content), f"MCQs - {topic_name} ({current_lang})")
-        if docx_bytes:
-            # Store in MongoDB
-            if db_service.is_connected() and "mcq_job_id" not in st.session_state:
-                try:
-                    job_id = db_service.store_mcq(
-                        topic=topic_name,
-                        language=current_lang,
-                        num_questions=len(mcqs),
-                        mcq_data=translated_items if translated_items else mcqs,
-                        docx_data=docx_bytes,
-                        metadata={"generated_at": str(datetime.now())}
-                    )
-                    
-                    if job_id:
-                        st.session_state["mcq_job_id"] = job_id
-                        st.info(f"💾 Stored in database. Job ID: {job_id}")
-                except Exception as db_exc:
-                    st.warning(f"⚠️ Could not store in database: {db_exc}")
-            
-            st.download_button(
-                "📥 Download MCQs (DOCX)",
-                data=docx_bytes,
-                file_name=f"mcqs_{topic_name.replace(' ', '_')}_{current_lang}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+@app.route('/api/jobs', methods=['GET'])
+def list_jobs():
+    """List all jobs (for debugging)."""
+    job_type = request.args.get('type')
+    limit = int(request.args.get('limit', 50))
+    
+    jobs = job_manager.list_jobs(job_type=job_type, limit=limit)
+    
+    return jsonify({
+        "jobs": [
+            {
+                "job_id": j["job_id"],
+                "type": j["type"],
+                "status": j["status"],
+                "progress": j["progress"],
+                "message": j["message"],
+                "created_at": j["created_at"].isoformat() if j["created_at"] else None,
+                "updated_at": j["updated_at"].isoformat() if j["updated_at"] else None
+            }
+            for j in jobs
+        ]
+    })
+
+
+@app.route('/api/languages', methods=['GET'])
+def get_languages():
+    """Get available languages."""
+    return jsonify({
+        "languages": LANGUAGES,
+        "language_list": list(LANGUAGES.keys())
+    })
+
+
+@app.errorhandler(404)
+def not_found(error):
+    """Handle 404 errors."""
+    return jsonify({"error": "Not found"}), 404
+
+
+@app.errorhandler(500)
+def internal_error(error):
+    """Handle 500 errors."""
+    logger.error(f"Internal server error: {error}", exc_info=True)
+    return jsonify({"error": "Internal server error"}), 500
+
+
+@app.before_request
+def check_api_key():
+    """Check if API key is configured (only on first request)."""
+    if not hasattr(app, '_api_key_checked'):
+        app._api_key_checked = True
+        if not GEMINI_API_KEY:
+            logger.warning(
+                "⚠️ API Key Missing!\n\n"
+                "Please add `GENAI_API_KEY` (or `GEMINI_API_KEY`) to your environment.\n\n"
+                "For local development:\n"
+                "1. Create a `.env` file in the project root\n"
+                "2. Add: `GENAI_API_KEY=your_api_key_here`\n\n"
+                "Get your API key from: https://makersuite.google.com/app/apikey"
             )
 
-# Footer
-st.markdown("---")
-st.markdown(
-    "<div style='text-align:center;color:#666;'>Powered by Google Gemini AI</div>",
-    unsafe_allow_html=True,
-)
+
+if __name__ == '__main__':
+    # Check API key before starting
+    if not GEMINI_API_KEY:
+        print("WARNING: GEMINI_API_KEY not configured!")
+        print("Please set GENAI_API_KEY in your environment or .env file")
+        print("App will start but features may not work.")
+    
+    # Run Flask app
+    print("Starting Flask server on http://localhost:5000")
+    app.run(debug=True, host='0.0.0.0', port=5000)
