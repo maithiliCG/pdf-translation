@@ -27,8 +27,6 @@ ENV/
 Thumbs.db
 
 # Project specific
-solution_jobs/
-pdf2zh_jobs/
 *.log
 
 # Temporary files

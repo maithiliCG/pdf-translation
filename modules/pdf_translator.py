@@ -4,6 +4,7 @@ PDF Translator Module - Full PDF translation with layout preservation
 import asyncio
 import io
 import os
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -17,15 +18,10 @@ from pdf2zh_next.config.model import SettingsModel
 from pdf2zh_next.config.translate_engine_model import GeminiSettings
 from pdf2zh_next.high_level import do_translate_async_stream
 
-from config.settings import PDF2ZH_JOBS_ROOT, LANGUAGES, GEMINI_API_KEY
+from config.settings import LANGUAGES, GEMINI_API_KEY
 from modules.common import _write_uploaded_file
 
 
-def _ensure_pdf2zh_job_dir():
-    """Create a new job directory for PDF translation."""
-    job_dir = PDF2ZH_JOBS_ROOT / str(uuid.uuid4())
-    job_dir.mkdir(parents=True, exist_ok=True)
-    return job_dir
 
 
 def _build_pdf2zh_settings(lang_label: str, output_dir: Path):
@@ -155,7 +151,7 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
     """
     lang_code = LANGUAGES.get(target_language, target_language)
     lang_label = target_language
-    job_dir = _ensure_pdf2zh_job_dir()
+    job_dir = Path(tempfile.mkdtemp(prefix="pdf2zh_job_"))
     input_pdf = job_dir / uploaded_file.name
     _write_uploaded_file(uploaded_file, input_pdf)
 
@@ -232,74 +228,5 @@ def translate_pdf_with_pdf2zh(uploaded_file, target_language, progress_bar=None,
         )
 
 
-def create_docx_from_pdf(pdf_path: str, title: str):
-    """Create DOCX from PDF pages as images."""
-    if not pdf_path or not os.path.exists(pdf_path):
-        return None
-    try:
-        doc = Document()
-        heading = doc.add_heading(title, level=0)
-        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-        pdf_doc = fitz.open(pdf_path)
-        zoom = 200 / 72
-        matrix = fitz.Matrix(zoom, zoom)
-
-        for index, page in enumerate(pdf_doc, start=1):
-            pix = page.get_pixmap(matrix=matrix)
-            image_stream = io.BytesIO(pix.tobytes("png"))
-            doc.add_heading(f"Page {index}", level=1)
-            doc.add_picture(image_stream, width=doc.sections[0].page_width - Inches(1))
-            if index < len(pdf_doc):
-                doc.add_page_break()
-
-        pdf_doc.close()
-        buffer = io.BytesIO()
-        doc.save(buffer)
-        buffer.seek(0)
-        return buffer.getvalue()
-    except Exception as exc:
-        st.error(f"DOCX creation from PDF failed: {exc}")
-        return None
 
 
-def create_docx_from_pdf_text(pdf_path: str, title: str):
-    """Create DOCX from PDF by extracting text content."""
-    if not pdf_path or not os.path.exists(pdf_path):
-        return None
-    try:
-        doc = Document()
-        heading = doc.add_heading(title, level=0)
-        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        pdf_doc = fitz.open(pdf_path)
-        
-        for page_num, page in enumerate(pdf_doc, start=1):
-            # Extract text from the page
-            text = page.get_text()
-            
-            if text.strip():
-                # Add page heading
-                doc.add_heading(f"Page {page_num}", level=1)
-                
-                # Split text into paragraphs and add them
-                paragraphs = text.split('\n\n')
-                for para in paragraphs:
-                    para = para.strip()
-                    if para:
-                        # Clean up the paragraph
-                        para = ' '.join(para.split())  # Normalize whitespace
-                        doc.add_paragraph(para)
-                
-                # Add page break except for last page
-                if page_num < len(pdf_doc):
-                    doc.add_page_break()
-        
-        pdf_doc.close()
-        buffer = io.BytesIO()
-        doc.save(buffer)
-        buffer.seek(0)
-        return buffer.getvalue()
-    except Exception as exc:
-        st.error(f"DOCX creation from PDF text failed: {exc}")
-        return None

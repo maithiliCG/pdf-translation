@@ -37,7 +37,7 @@ fi
 
 # Create runtime directories
 echo "📁 Creating runtime directories..."
-mkdir -p solution_jobs pdf2zh_jobs pdf2zh_files
+mkdir -p pdf2zh_files
 
 echo "✅ Setup complete!"
 echo ""

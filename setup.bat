@@ -40,8 +40,6 @@ if not exist ".env" (
 
 REM Create runtime directories
 echo 📁 Creating runtime directories...
-if not exist "solution_jobs" mkdir solution_jobs
-if not exist "pdf2zh_jobs" mkdir pdf2zh_jobs
 if not exist "pdf2zh_files" mkdir pdf2zh_files
 
 echo ✅ Setup complete!

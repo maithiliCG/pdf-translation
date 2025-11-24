@@ -14,7 +14,7 @@ from modules.mcq_generator import (
     _translate_mcq_items,
     _iter_options,
 )
-from modules.pdf_translator import translate_pdf_with_pdf2zh, create_docx_from_pdf
+from modules.pdf_translator import translate_pdf_with_pdf2zh
 from modules.common import create_docx
 from modules.database_service import db_service
 
@@ -159,9 +159,25 @@ with tab2:
     
     if solution_file and st.button("🚀 Run Solution Pipeline"):
         progress = st.progress(0)
-        status = st.empty()
+        status_box = st.empty()
+
+        def _solution_status_callback(progress_value: int, message: str, state: str):
+            progress_value = max(0, min(progress_value if progress_value is not None else 0, 100))
+            progress.progress(progress_value, text=message)
+            if state == "completed":
+                status_box.success(message)
+            elif state == "failed":
+                status_box.error(message)
+            else:
+                status_box.info(message)
+
         try:
-            result = run_solution_generation_pipeline(solution_file, solution_language, progress, status)
+            result = run_solution_generation_pipeline(
+                solution_file,
+                solution_language,
+                status_callback=_solution_status_callback,
+                job_id="streamlit_ui",
+            )
             st.session_state["solution_result"] = result
             
             # Store in MongoDB
@@ -197,7 +213,7 @@ with tab2:
             st.success("Pipeline completed successfully!")
         except Exception as exc:
             progress.empty()
-            status.empty()
+            status_box.empty()
             st.error(f"Solution pipeline failed: {exc}")
 
     result = st.session_state.get("solution_result")
